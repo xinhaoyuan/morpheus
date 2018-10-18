@@ -22,6 +22,7 @@
 -export([ handle/5
         , handle_erlang_spawn/2, handle_erlang_spawn/3, handle_erlang_spawn/4, handle_erlang_spawn/5
         , handle_erlang_spawn_opt/2, handle_erlang_spawn_opt/4
+        , hibernate_entry/3
         ]).
 
 -include("morpheus_priv.hrl").
@@ -82,6 +83,7 @@
         , abs_id_table     :: dict:dict()
         , abs_id_counter   :: integer()
         , transient_counter:: integer()
+        , alive            :: [pid()]
         , alive_counter    :: integer()
         , buffer_counter   :: integer()
         , buffer           :: [{integer(), #fd_delay_req{}, term()}]
@@ -120,7 +122,7 @@ ctl_state_format(S) ->
               , fd_scheduler
               , et_collector
               ];
-          (sandbox_state, 23) ->
+          (sandbox_state, 24) ->
               [ opt
               , initial
               , mod_table
@@ -130,6 +132,7 @@ ctl_state_format(S) ->
               , abs_id_table
               , abs_id_counter
               , transient_counter
+              , alive
               , alive_counter
               , buffer_counter
               , buffer
@@ -271,6 +274,7 @@ ctl_init(Opts) ->
         , abs_id_table = dict:new()
         , abs_id_counter = 0
         , transient_counter = 0
+        , alive = []
         , alive_counter = 0
         , buffer_counter = 0
         , buffer = []
@@ -493,7 +497,8 @@ ctl_push_request_to_buffer(
                             waiting = NewWaiting
                            };
         _ ->
-            S#sandbox_state{alive_counter = S#sandbox_state.alive_counter - 1,
+            S#sandbox_state{alive = S#sandbox_state.alive -- [ReplyTo],
+                            alive_counter = S#sandbox_state.alive_counter - 1,
                             buffer = NewBuffer,
                             buffer_counter = BC + 1,
                             waiting_counter = WC + 1,
@@ -517,7 +522,8 @@ ctl_pop_request_from_buffer(#sandbox_state{waiting_counter = WC, waiting = Waiti
                                      waiting = NewWaiting},
                      ReplyTo, Ref, Req};
                 _ ->
-                    {S#sandbox_state{alive_counter = S#sandbox_state.alive_counter + 1,
+                    {S#sandbox_state{alive = [ReplyTo | S#sandbox_state.alive],
+                                     alive_counter = S#sandbox_state.alive_counter + 1,
                                      waiting_counter = WC - 1,
                                      waiting = NewWaiting},
                      ReplyTo, Ref, Req}
@@ -912,7 +918,9 @@ ctl_handle_call(#sandbox_state
                     catch erlang:set_fake_node(Proc, Node)
             end,
             {S#sandbox_state{proc_table = PT6, abs_id_table = dict:store(Proc, AIDC, AIDT), abs_id_counter = AIDC + 1,
-                             transient_counter = TC + 1, alive_counter = AC + 1}, ok};
+                             transient_counter = TC + 1,
+                             alive = [Proc | S#sandbox_state.alive],
+                             alive_counter = AC + 1}, ok};
         {undefined, {_, OtherStatus}} ->
             ?ERROR("instrumented_process_created: node ~p is not alive, status: ~p", [Node, OtherStatus]),
             {S, badarg}
@@ -1176,7 +1184,9 @@ ctl_handle_call(#sandbox_state{ opt = _Opt
                             {S, Ref};
                         infinity ->
                             PT0 = ?TABLE_SET(PT, {receive_status, Proc}, {Ref, PatFun0, infinity}),
-                            {S#sandbox_state{proc_table = PT0, alive_counter = AC - 1}, Ref};
+                            {S#sandbox_state{proc_table = PT0, 
+                                             alive = S#sandbox_state.alive -- [Proc],
+                                             alive_counter = AC - 1}, Ref};
                         _ when is_integer(Timeout), Timeout > 0 ->
                             #sandbox_state{vclock = Clock, timeouts = Timeouts, timeouts_counter = TimeoutsC} = S,
                             Deadline = Clock + Timeout,
@@ -1184,7 +1194,9 @@ ctl_handle_call(#sandbox_state{ opt = _Opt
                                 S#sandbox_state.opt#sandbox_opt.control_timeouts,
                                 Deadline >= S#sandbox_state.vclock_limit ->
                                     PT0 = ?TABLE_SET(PT, {receive_status, Proc}, {Ref, PatFun0, infinity}),
-                                    {S#sandbox_state{proc_table = PT0, alive_counter = AC - 1}, Ref};
+                                    {S#sandbox_state{proc_table = PT0,
+                                                     alive = S#sandbox_state.alive -- [Proc],
+                                                     alive_counter = AC - 1}, Ref};
                                 true ->
                                     S1 =
                                         case S#sandbox_state.opt#sandbox_opt.control_timeouts of
@@ -1200,7 +1212,9 @@ ctl_handle_call(#sandbox_state{ opt = _Opt
                                                 S
                                         end,
                                     PT0 = ?TABLE_SET(PT, {receive_status, Proc}, {Ref, PatFun0, Deadline}),
-                                    {S1#sandbox_state{proc_table = PT0, alive_counter = AC - 1, timeouts_counter = TimeoutsC + 1}, Ref}
+                                    {S1#sandbox_state{proc_table = PT0, 
+                                                      alive = S#sandbox_state.alive -- [Proc], alive_counter = AC - 1,
+                                                      timeouts_counter = TimeoutsC + 1}, Ref}
                             end
                     end;
                 {found, Pos} ->
@@ -1386,7 +1400,9 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             %% Handle ets heir
             S3 = ctl_process_ets_on_exit(S2, Proc),
             #sandbox_state{transient_counter = TC, alive_counter = AC} = S3,
-            {S3#sandbox_state{transient_counter = TC - 1, alive_counter = AC - 1}, ok};
+            {S3#sandbox_state{transient_counter = TC - 1,
+                              alive = S3#sandbox_state.alive -- [Proc],
+                              alive_counter = AC - 1}, ok};
         undefined ->
             ?WARNING("process_on_exit for unknown proc", []),
             {S, noproc}
@@ -1522,6 +1538,7 @@ ctl_handle_cast( #sandbox_state{ proc_table = PT
             Proc ! {Ref, timeout},
             S#sandbox_state{
               proc_table = ?TABLE_REMOVE(PT, {receive_status, Proc}),
+              alive = [Proc | S#sandbox_state.alive],
               alive_counter = AC + 1,
               timeouts_counter = TimeoutsC - 1,
               vclock = if
@@ -1627,10 +1644,15 @@ ctl_process_send( #sandbox_state
                                 Proc ! {Ref, [message | Msg]},
                                 case _Timeout of
                                     infinity ->
-                                        {S#sandbox_state{proc_table = ?TABLE_REMOVE(PT, {receive_status, Proc}), alive_counter = AC + 1}, ok, matched};
+                                        {S#sandbox_state{proc_table = ?TABLE_REMOVE(PT, {receive_status, Proc}),
+                                                         alive = [Proc | S#sandbox_state.alive],
+                                                         alive_counter = AC + 1}, ok, matched};
                                     _ ->
                                         #sandbox_state{timeouts_counter = TimeoutsC} = S,
-                                        {S#sandbox_state{proc_table = ?TABLE_REMOVE(PT, {receive_status, Proc}), alive_counter = AC + 1, timeouts_counter = TimeoutsC - 1}, ok, matched}
+                                        {S#sandbox_state{proc_table = ?TABLE_REMOVE(PT, {receive_status, Proc}),
+                                                         alive = [Proc | S#sandbox_state.alive],
+                                                         alive_counter = AC + 1,
+                                                         timeouts_counter = TimeoutsC - 1}, ok, matched}
                                 end;
                             false ->
                                 NewQueue = [Msg | MsgQueue],
@@ -1684,10 +1706,14 @@ ctl_process_send_signal( #sandbox_state
                     Proc ! {Ref, signal},
                     case _Timeout of
                         infinity ->
-                            {S#sandbox_state{proc_table = ?TABLE_REMOVE(PT, {receive_status, Proc}), alive_counter = AC + 1}, ok};
+                            {S#sandbox_state{proc_table = ?TABLE_REMOVE(PT, {receive_status, Proc}),
+                                             alive = [Proc | S#sandbox_state.alive],
+                                             alive_counter = AC + 1}, ok};
                         _ ->
                             #sandbox_state{timeouts_counter = TimeoutsC} = S,
-                            {S#sandbox_state{proc_table = ?TABLE_REMOVE(PT, {receive_status, Proc}), alive_counter = AC + 1, timeouts_counter = TimeoutsC - 1}, ok}
+                            {S#sandbox_state{proc_table = ?TABLE_REMOVE(PT, {receive_status, Proc}),
+                                             alive = [Proc | S#sandbox_state.alive],
+                                             alive_counter = AC + 1, timeouts_counter = TimeoutsC - 1}, ok}
                     end
             end
     end.
@@ -2149,6 +2175,10 @@ become_tomb() ->
 %% tomb() ->
 %%     receive _ -> erlang:hibernate(?MODULE, tomb, []) after infinity -> error(zombie) end.
 
+hibernate_entry(M, F, A) ->
+    receive morpheus_internal_hibernate_wakeup -> ok end,
+    instrumented_process_end(?CATCH(apply(M, F, A))).
+
 %% sandboxed lib erlang handling
 
 handle_erlang('!', [T, M], Aux) ->
@@ -2434,7 +2464,8 @@ handle_erlang(unique_integer, _Args, _Aux) ->
 %% hibernate
 handle_erlang(hibernate, [M, F, A], _Aux) ->
     {M0, F0, A0} = rewrite_call(M, F, A),
-    erlang:hibernate(M0, F0, A0);
+    self() ! morpheus_internal_hibernate_wakeup,
+    erlang:hibernate(?MODULE, hibernate_entry, [M0, F0, A0]);
 %% HACK, this is for rand! hopefully we don't mess up other things
 %% XXX only do this if the stack contains rand:seed_s?
 handle_erlang(phash2, [Term], _Aux) ->
