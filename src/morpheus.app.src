@@ -1,0 +1,22 @@
+{application, morpheus,
+ [{description, "An OTP library"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {applications,
+   [kernel,
+    stdlib
+   ]},
+  {env,[]},
+  {modules, [ morpheus_instrument
+            , morpheus_sandbox
+            , morpheus_helper
+            , morpheus_guest
+            , morpheus_guest_real
+            , morpheus_guest_helper
+            , morpheus_guest_internal
+            , morpheus_sandbox_mock_epmd_module
+            ]},
+  {maintainers, []},
+  {licenses, ["Apache 2.0"]},
+  {links, []}
+ ]}.

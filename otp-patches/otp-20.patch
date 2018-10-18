@@ -1,0 +1,116 @@
+diff --git a/erts/emulator/beam/atom.names b/erts/emulator/beam/atom.names
+index 7b12e5432d..da344cb19f 100644
+--- a/erts/emulator/beam/atom.names
++++ b/erts/emulator/beam/atom.names
+@@ -708,3 +708,4 @@ atom xor
+ atom x86
+ atom yes
+ atom yield
++atom fake_node
+diff --git a/erts/emulator/beam/bif.c b/erts/emulator/beam/bif.c
+index d7a25adccb..b263628ef5 100644
+--- a/erts/emulator/beam/bif.c
++++ b/erts/emulator/beam/bif.c
+@@ -1086,7 +1086,10 @@ BIF_RETTYPE spawn_opt_1(BIF_ALIST_1)
+ 		if (scheduler < 0 || erts_no_schedulers < scheduler)
+ 		    goto error;
+ 		so.scheduler = (int) scheduler;
+-	    } else {
++	    } else if (arg == am_fake_node && is_atom(val)) {
++                so.flags |= SPO_FAKE_NODE;
++                so.fake_node = val;
++            } else {
+ 		goto error;
+ 	    }
+ 	} else {
+diff --git a/erts/emulator/beam/bif.tab b/erts/emulator/beam/bif.tab
+index 10ca0b5066..4a1078242e 100644
+--- a/erts/emulator/beam/bif.tab
++++ b/erts/emulator/beam/bif.tab
+@@ -685,3 +685,5 @@ bif erts_internal:maps_to_list/2
+ #
+ 
+ bif erlang:iolist_to_iovec/1
++
++bif erlang:set_fake_node/2
+diff --git a/erts/emulator/beam/dist.c b/erts/emulator/beam/dist.c
+index 9fddac8980..df44235e0c 100644
+--- a/erts/emulator/beam/dist.c
++++ b/erts/emulator/beam/dist.c
+@@ -2942,9 +2942,29 @@ BIF_RETTYPE node_1(BIF_ALIST_1)
+ { 
+     if (is_not_node_container(BIF_ARG_1))
+       BIF_ERROR(BIF_P, BADARG);
++    if (is_internal_pid(BIF_ARG_1)) {
++        Process * rp = erts_proc_lookup_raw(BIF_ARG_1);
++        if (rp && !is_same(rp->fake_node, NIL)) {
++            BIF_RET(rp->fake_node);
++        }
++    }
+     BIF_RET(node_container_node_name(BIF_ARG_1));
+ }
+ 
++BIF_RETTYPE set_fake_node_2(BIF_ALIST_2)
++{
++    Eterm proc = BIF_ARG_1;
++    Eterm name = BIF_ARG_2;
++    if (is_internal_pid(proc) && is_atom(name)) {
++        Process * rp = erts_proc_lookup_raw(proc);
++        if (rp) {
++            rp->fake_node = name;
++            BIF_RET(am_ok);
++        }
++    }
++    BIF_RET(am_badarg);
++}
++
+ /**********************************************************************/
+ /* node() -> Node */
+ 
+diff --git a/erts/emulator/beam/erl_process.c b/erts/emulator/beam/erl_process.c
+index ffbfbc4e56..17718d9c49 100644
+--- a/erts/emulator/beam/erl_process.c
++++ b/erts/emulator/beam/erl_process.c
+@@ -12452,6 +12452,13 @@ erl_create_process(Process* parent, /* Parent of process (default group leader).
+     p->u.initial.function = func;
+     p->u.initial.arity = (Uint) arity;
+ 
++    if (so->flags & SPO_FAKE_NODE) {
++        p->fake_node = so->fake_node;
++    }
++    else {
++        p->fake_node = NIL;
++    }
++
+     /*
+      * Must initialize binary lists here before copying binaries to process.
+      */
+diff --git a/erts/emulator/beam/erl_process.h b/erts/emulator/beam/erl_process.h
+index 5cac939771..62e3ae68f0 100644
+--- a/erts/emulator/beam/erl_process.h
++++ b/erts/emulator/beam/erl_process.h
+@@ -1092,6 +1092,8 @@ struct process {
+     erts_smp_atomic32_t dirty_state; /* Process dirty state flags (see ERTS_PDSFLG_*) */
+ #endif
+ 
++    Eterm fake_node;
++
+ #ifdef ERTS_SMP
+     ErlMessageInQueue msg_inq;
+     ErlTraceMessageQueue *trace_msg_q;
+@@ -1315,6 +1317,7 @@ void erts_check_for_holes(Process* p);
+ #define SPO_SYSTEM_PROC 8
+ #define SPO_OFF_HEAP_MSGQ 16
+ #define SPO_ON_HEAP_MSGQ 32
++#define SPO_FAKE_NODE 64
+ 
+ extern int erts_default_spo_flags;
+ 
+@@ -1325,6 +1328,7 @@ typedef struct {
+     int flags;
+     int error_code;		/* Error code returned from create_process(). */
+     Eterm mref;			/* Monitor ref returned (if SPO_MONITOR was given). */
++    Eterm fake_node;
+ 
+     /*
+      * The following items are only initialized if the SPO_USE_ARGS flag is set.
