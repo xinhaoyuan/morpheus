@@ -12,30 +12,10 @@ Build
     make
 
 
-Limitations
------
-
- - Simulating distributed settings requires patching Beam VM.
-
-   Patches are in otp-patches (so far only for OTP-20).
-
- - External inputs (i.e. ports and NIFs) need to be determinisitic given the control of the erlang program.
-
-   For example, we don't support ports that send back random numbers.
-
- - It only supports fully connected nodes without node-level failure.
-
-   Node failures can be (hopefully) simulated by killing/resetting applications on nodes.
-
-Generally speaking, complete sandboxing is tricky and costly.
-There are potentially other holes that change application behaviors unexpectedly and produce false positives.
-This often happens due to bad failure handling of simulated API that we mis-interpreted.
-We do not guarantee that Morpheus can isolate everything in the sandbox.
-
 Usage
 -----
 
-As a research project, the API may change overtime and the document here may become obsolute -- please refer to example codes. 
+As a research project, the API may change overtime and the document here may become obsolute -- please refer to example code.
 
 We use the term `host` to refer the program running outside of the sandbox and `guest` for the program inside.
 
@@ -117,6 +97,26 @@ Examples
 -----
 
 Please see the repo https://github.com/xinhaoyuan/morpheus-app-test for exmaples of testing real applications.
+
+Limitations
+-----
+
+ - Simulating distributed settings requires patching Beam VM.
+
+   Patches are in otp-patches (so far only for OTP-20).
+
+ - External inputs (i.e. ports and NIFs) need to be determinisitic given the control of the erlang program.
+
+   For example, we don't support ports that send back random numbers.
+
+ - It only supports fully connected nodes without node-level failure.
+
+   Node failures can be (hopefully) simulated by killing/resetting applications on nodes.
+
+Generally speaking, complete sandboxing is tricky and costly.
+There are potentially other holes that change application behaviors unexpectedly and produce false positives.
+This often happens due to bad failure handling of simulated API that we mis-interpreted.
+We do not guarantee that Morpheus can isolate everything in the sandbox.
 
 License
 ----
