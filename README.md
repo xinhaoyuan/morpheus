@@ -25,19 +25,19 @@ morpheus:start(module(), atom(), arity(), [property()]) -> pid() | {pid(), refer
 ```
 which takes the entry function of the sandbox and startup options, and returns the pid of the controller process (with a monitor link if the `monitor` option is proveided).
 
-After the sandbox is started, host usually waits for the sandbox to end with some reason, which is usually the testing result.
+After the sandbox is started, host usually waits for the sandbox to end with some result, which is passed using the exit reason of the controller process.
 
-Below shows a typical host side code for a morpheus-based test, which assert that the test in the sandbox exits with the `success` atom.
+Below is the typical host side code for a morpheus-based test, which assert that the test in the sandbox exits with the `success` atom.
 
 ```erlang
 {_, MRef} = morpheus:start(?MODULE, sandbox_entry, [], [monitor, ...]),
 success = receive {'DOWN', MRef, _, _, Reason} -> Reason end
 ```
 
-Inside the sandbox, the guest perform tests normally as if it is executed without sandboxing.
+Inside the sandbox, the guest performs tests normally as if it is executed without sandboxing.
 However, when the entry function is called in the sandbox, __no__ system components are started.
 This means the guest has to start them if any are needed as dependencies.
-Morpheus provided `morpheus_guest_helper:bootstrap/0` function to start a __single-node__ environment with `kernel` and `stdlib` started.
+Morpheus provided `morpheus_guest_helper:bootstrap/0` function to start a __single-node__ environment with `kernel` and `stdlib` applications.
 With that called, the guest could basically do any testing as it normally would do,
 and returns the testing result to the host by `morpheus:exit_with(Reason :: term()) -> none()` function.
 
