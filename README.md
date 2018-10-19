@@ -15,7 +15,7 @@ Build
 Usage
 -----
 
-As a research project, the API may change overtime and the document here may become obsolute -- please refer to example code.
+As a research project, the API may change overtime and the document here may become obsolete -- please refer to example code.
 
 We use the term `host` to refer the program running outside of the sandbox and `guest` for the program inside.
 
