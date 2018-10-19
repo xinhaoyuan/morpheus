@@ -27,7 +27,7 @@ which takes the entry function of the sandbox and startup options, and returns t
 
 After the sandbox is started, host usually waits for the sandbox to end with some result, which is passed using the exit reason of the controller process.
 
-Below is the typical host side code for a morpheus-based test, which assert that the test in the sandbox exits with the `success` atom.
+Below is the typical host side code for a morpheus-based test, which asserts that the test in the sandbox exits with the `success` atom.
 
 ```erlang
 {_, MRef} = morpheus:start(?MODULE, sandbox_entry, [], [monitor, ...]),
@@ -57,7 +57,7 @@ sandbox_entry() ->
 The integration with Firedrill allows reliable and scalable randomized concurrency testing.
 To do this, one needs to specify Firedrill options as `{fd_opts, ...}` in the option lists.
 
-Due to lack of documentation, we list the most important options here:
+Due to the lack of documentation, we list the most important options here:
 
  - `{scheduler, {SchedName, SchedOpts}}`
  
