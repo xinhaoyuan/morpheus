@@ -75,7 +75,6 @@ bootstrap_remote(Node) ->
     receive Ref -> ok end.
 
 bootstrap_remote_entry(Parent, Ref, Node) ->
-    morpheus_guest_internal:init(),
     bootstrap(),
     {ok, _} = net_kernel:start([Node]),
     Parent ! Ref,

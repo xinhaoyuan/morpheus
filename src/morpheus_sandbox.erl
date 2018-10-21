@@ -26,6 +26,7 @@
         ]).
 
 -include("morpheus_priv.hrl").
+-include("morpheus_ctl_calls.hrl").
 -include_lib("firedrill/include/firedrill.hrl").
 
 -define(H, morpheus_helper).
@@ -290,9 +291,9 @@ start(M, F, A, Opts) ->
                 Ctl
         end,
     Node = proplists:get_value(node, Opts, node()),
-    {ok, ok} = call_ctl(Ctl, {node_created, Node}),
-    {ok, Opt} = call_ctl(Ctl, {get_opt}),
-    {ok, ShTab} = call_ctl(Ctl, {get_shtab}),
+    {ok, ok} = ?ctl_call_node_created(Ctl, Node),
+    {ok, Opt} = ?ctl_call_get_opt(Ctl),
+    {ok, ShTab} = ?ctl_call_get_shtab(Ctl),
     {ok, {NewM, Nifs}} = instrument_module(Ctl, M),
     {ok, {NewGI, []}} = instrument_module(Ctl, morpheus_guest_internal),
     RealM =
@@ -306,7 +307,7 @@ start(M, F, A, Opts) ->
                         %% virtual init process!
                         erlang:group_leader(self(), self()),
                         instrumented_process_start(Ctl, Node, Opt, ShTab),
-                        call_ctl(Ctl, {initial_kick}),
+                        ?ctl_call_initial_kick(Ctl),
                         NewGI:init(),
                         instrumented_process_end(?CATCH(apply(RealM, F, A)))
                 end),
@@ -2870,22 +2871,17 @@ decode_ets_name(Name) ->
 
 start_node(Node, M, F, A) ->
     Ctl = get_ctl(),
-    {ok, ok} = call_ctl(Ctl, {node_created, Node}),
+    {ok, ok} = ?ctl_call_node_created(Ctl, Node),
     Opt = get_opt(),
     ShTab = get_shtab(),
-    {ok, {NewM, Nifs}} = instrument_module(Ctl, M),
-    RealM =
-        case lists:member({F, length(A)}, Nifs) of
-            true ->
-                ?WARNING("Trying to spawn a process with nif entry ~p - this may go wild!", [{M, F, A}]),
-                M;
-            false -> NewM
-        end,
+    {ok, EM, EF} = get_instrumented_func(Ctl, M, F, length(A)),
+    {ok, GIM, GIF} = get_instrumented_func(Ctl, morpheus_guest_internal, init, []),
     Pid = spawn(fun () ->
                         %% virtual init process!
                         erlang:group_leader(self(), self()),
                         instrumented_process_start(Ctl, Node, Opt, ShTab),
-                        instrumented_process_end(?CATCH(apply(RealM, F, A)))
+                        apply(GIM, GIF, []),
+                        instrumented_process_end(?CATCH(apply(EM, EF, A)))
                 end),
     instrumented_process_created(Ctl, ShTab, Node, Pid),
     instrumented_process_kick(Ctl, Node, Pid),
