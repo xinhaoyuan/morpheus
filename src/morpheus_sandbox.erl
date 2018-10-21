@@ -616,15 +616,15 @@ ctl_call_can_buffer({undet}) -> false;
 ctl_call_can_buffer(_) -> true.
 
 ctl_call_to_delay(true, {nodelay, _}) -> false;
-ctl_call_to_delay(true, {undet}) -> false;
+ctl_call_to_delay(true, ?cci_undet()) -> false;
 ctl_call_to_delay(true, {undet, _}) -> false;
 ctl_call_to_delay(true, {undet_barrier, _}) -> false;
-ctl_call_to_delay(true, {initial_kick}) -> false;
-ctl_call_to_delay(true, {get_shtab}) -> false;
-ctl_call_to_delay(true, {get_opt}) -> false;
+ctl_call_to_delay(true, ?cci_initial_kick()) -> false;
+ctl_call_to_delay(true, ?cci_get_shtab()) -> false;
+ctl_call_to_delay(true, ?cci_get_opt()) -> false;
 ctl_call_to_delay(true, {resource_acquire, _}) -> false;
-ctl_call_to_delay(true, {instrument, _}) -> false;
-ctl_call_to_delay(true, {node_created, _}) -> false;
+ctl_call_to_delay(true, ?cci_instrument_module(_)) -> false;
+ctl_call_to_delay(true, ?cci_node_created(_)) -> false;
 ctl_call_to_delay(true, {instrumented_process_created, _, _}) -> false;
 ctl_call_to_delay(true, {process_receive, _, _, _}) -> false;
 %% ctl_call_to_delay(true, {receive_timeout, _, _}) -> false;
@@ -671,7 +671,7 @@ ctl_handle_call(S, {maybe_delay, Req}) ->
     ctl_handle_call(S, Req);
 ctl_handle_call(S, {log, _}) ->
     {S, ok};
-ctl_handle_call(S, {initial_kick}) ->
+ctl_handle_call(S, ?cci_initial_kick()) ->
     {S#sandbox_state{initial = false}, ok};
 ctl_handle_call(S, {ets_op}) ->
     {S, ok};
@@ -697,9 +697,9 @@ ctl_handle_call(S, {undet_barrier, Result}) ->
 % internal use only
 ctl_handle_call(#sandbox_state{transient_counter = TC} = S, {become_persistent, _Proc}) ->
     {S#sandbox_state{transient_counter = TC - 1}, ok};
-ctl_handle_call(#sandbox_state{opt = Opt} = S, {get_opt}) ->
+ctl_handle_call(#sandbox_state{opt = Opt} = S, ?cci_get_opt()) ->
     {S, Opt};
-ctl_handle_call(#sandbox_state{proc_shtable = ShTab} = S, {get_shtab}) ->
+ctl_handle_call(#sandbox_state{proc_shtable = ShTab} = S, ?cci_get_shtab()) ->
     {S, ShTab};
 ctl_handle_call(#sandbox_state{opt = Opt} = S, {get_clock}) ->
     case Opt#sandbox_opt.control_timeouts of
@@ -711,7 +711,7 @@ ctl_handle_call(#sandbox_state{opt = Opt} = S, {get_clock}) ->
     end;
 ctl_handle_call(#sandbox_state{unique_integer = UI} = S, {unique_integer}) ->
     {S#sandbox_state{unique_integer = UI + 1}, UI};
-ctl_handle_call(#sandbox_state{mod_table = MT} = S, {instrument, M}) ->
+ctl_handle_call(#sandbox_state{mod_table = MT} = S, ?cci_instrument_module(M)) ->
     case ?TABLE_GET(MT, M) of
         {M, {NewM, Nifs}} ->
             {S, {NewM, Nifs}};
@@ -1207,7 +1207,7 @@ ctl_handle_call(#sandbox_state{ opt = _Opt
             Proc ! {Ref, signal},
             {S, Ref}
     end;
-ctl_handle_call(S, {process_send, From, Where, To, M}) ->
+ctl_handle_call(S, ?cci_send_msg(From, Where, To, M)) ->
     ctl_process_send(S, From, Where, To, M);
 ctl_handle_call(#sandbox_state{proc_table = PT} = S, {process_info, Proc, Props}) ->
     Ret =
@@ -1273,7 +1273,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S, {is_process_alive, Proc}) -
             {S, false}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                {process_send_signal, From, Where, Proc, Reason}) ->
+                ?cci_send_signal(From, Where, Proc, Reason)) ->
     case ?TABLE_GET(PT, {proc, Proc}) of
         {_, {alive, Props}} ->
             case Reason =/= kill andalso dict:find(trap_exit, Props) of
@@ -2336,7 +2336,7 @@ handle_erlang(link, [ProcOrPort], _Aux) ->
     Ret =
         if
             is_pid(ProcOrPort) ->
-                case call_ctl(get_ctl(), {process_link, self(), ProcOrPort}) of
+                case ?ctl_call_process_link(get_ctl(), self(), ProcOrPort) of
                     {ok, noproc} ->
                         error(noproc);
                     {ok, badarg} ->
@@ -2377,7 +2377,7 @@ handle_erlang(unlink, [ProcOrPort], _Aux) ->
     Ret =
     if
         is_pid(ProcOrPort) ->
-            case call_ctl(get_ctl(), {process_unlink, self(), ProcOrPort}) of
+            case ?ctl_call_process_unlink(get_ctl(), self(), ProcOrPort) of
                 {ok, badarg} ->
                     error(badarg);
                 {ok, InRet} ->
