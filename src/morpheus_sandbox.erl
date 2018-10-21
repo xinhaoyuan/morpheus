@@ -171,7 +171,7 @@ ctl_trace_receive_real(_Opt, _SHT,
     ?INFO("~w@~p <-!-:~n  ~p", [Proc, Where, Type]).
 
 %% Currently, proc_table contains the following kinds of entries:
-%% {proc, PID} -> {alive, dict:dict()} | {tomb}
+%% {proc, PID} -> {alive, dict:dict()} | {tomb, Node}
 %% {msg_queue, PID} -> [term()]
 %% {monitor, Ref} -> {Watcher, Target, Object} - note that it's possible to have Watcher =:= Target
 %% {watching, PID} -> [{Ref, PID}]
@@ -938,18 +938,26 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             end;
         Other ->
             case {?TABLE_GET(PT, {proc, PA}), ?TABLE_GET(PT, {proc, PB})} of
-                {{_, {alive, Props}}, {_, {tomb}}} ->
-                    case dict:find(trap_exit, Props) of
-                        {ok, true} ->
-                            {S0, ok} = ctl_process_send(S, system, undefined, PA, {'EXIT', PB, noproc}),
-                            {S0, true};
-                        _ ->
-                            {S, noproc}
+                {{_, {alive, Props}}, {_, {tomb, TNode}}} ->
+                    case ?TABLE_GET(PT, {name, PA}) of
+                        {_, {TNode, _}} ->
+                            %% local node
+                            {S, noproc};
+                        {_, {_OtherNode, _}} ->
+                            case dict:find(trap_exit, Props) of
+                                {ok, true} ->
+                                    {S0, ok} = ctl_process_send(S, system, undefined, PA, {'EXIT', PB, noproc}),
+                                    {S0, true};
+                                _ ->
+                                    %% Should we send signal noproc?
+                                    ?INFO("~w: return noproc when linking to some dead remote proc ~w ... maybe problematic?", [PA, PB]),
+                                    {S, noproc}
+                            end
                     end;
                 {{_, {alive, _Props}}, undefined} ->
                     ?WARNING("ignored link ~p with external process ~p", [PA, PB]),
                     {S, true};
-                {{_, {tomb}}, _} ->
+                {{_, {tomb, _}}, _} ->
                     ?ERROR("process_link - zombie?", []),
                     %% Whatever ...
                     {S, noproc};
@@ -975,9 +983,9 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             case {?TABLE_GET(PT, {proc, PA}), ?TABLE_GET(PT, {proc, PB})} of
                 {{_, {alive, _}}, {_, {alive, _}}} ->
                     {S, true};
-                {{_, {alive, _}}, {_, {tomb}}} ->
+                {{_, {alive, _}}, {_, {tomb, _}}} ->
                     {S, true};
-                {{_, {tomb}}, _} ->
+                {{_, {tomb, _}}, _} ->
                     ?ERROR("process_unlink - zombie?", []),
                     {S, true};
                 Other ->
@@ -1051,7 +1059,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             {S#sandbox_state{
                proc_table = ?TABLE_SET(PT, {proc, Proc}, {alive, dict:store(trap_exit, On, Props)})},
              {prev, Prev}};
-        {_, {tomb}} ->
+        {_, {tomb, _}} ->
             ?WARNING("process_set_trap_exit - zombie?", []),
             {S, noproc};
         undefined ->
@@ -1263,7 +1271,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S, {is_process_alive, Proc}) -
             {S, erlang:is_process_alive(Proc)};
         {_, {alive, _}} ->
             {S, true};
-        {_, {tomb}} ->
+        {_, {tomb, _}} ->
             {S, false}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
@@ -1294,7 +1302,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             {_, LList} = ?TABLE_GET(PT, {linking, Proc}),
             {_, PList} = ?TABLE_GET(PT, {node_procs, Node}),
             PT0 = ?TABLE_SET(?TABLE_SET(?TABLE_REMOVE(?TABLE_REMOVE(PT, {msg_queue, Proc}), {name, Proc}),
-                                        {proc, Proc}, {tomb}),
+                                        {proc, Proc}, {tomb, Node}),
                              {node_procs, Node}, PList -- [Proc]),
             PT1 = case ?TABLE_GET(PT, deadprocs) of
                       undefined ->
@@ -1482,9 +1490,9 @@ ctl_monitor_proc(#sandbox_state{proc_table = PT} = S,
                         false;
                     _ ->
                         case {?TABLE_GET(PT, {proc, Watcher}), ?TABLE_GET(PT, {proc, Target})} of
-                            {{_, {alive, _}}, {_, {tomb}}} ->
+                            {{_, {alive, _}}, {_, {tomb, _}}} ->
                                 ok;
-                            {{_, {tomb}}, _} ->
+                            {{_, {tomb, _}}, _} ->
                                 ?ERROR("process_monitor - zombie??", []);
                             Other ->
                                 ?WARNING("Unhandled process_monitor ~p", [Other])
@@ -1596,7 +1604,7 @@ ctl_process_send( #sandbox_state
         case ?TABLE_GET(PT, {msg_queue, Proc}) of
             undefined ->
                 case ?TABLE_GET(PT, {proc, Proc}) of
-                    {_, {tomb}} ->
+                    {_, {tomb, _}} ->
                         {S, ok, send_to_tomb};
                     undefined ->
                         case {?TABLE_GET(PT, {external_proc, Proc}), ?TABLE_GET(PT, {port_agent, Proc})} of
@@ -1721,7 +1729,7 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT} = S, Reason) ->
         ?TABLE_FOLD(PT,
                     fun ({{proc, Proc}, {alive, _}}, {L, D}) ->
                             exit(Proc, kill), {L + 1, D};
-                        ({{proc, Proc}, {tomb}}, {L, D}) ->
+                        ({{proc, Proc}, {tomb, _}}, {L, D}) ->
                             exit(Proc, kill), {L, D + 1};
                         (_, Acc) ->
                             Acc
@@ -2326,8 +2334,23 @@ handle_erlang(process_flag, [trap_exit, On], _Aux) ->
     {ok, {prev, Prev}} = call_ctl(get_ctl(), {process_set_trap_exit, self(), On}),
     Prev;
 %% link
-handle_erlang(link, [Proc], _Aux) when is_pid(Proc) ->
-    {ok, Ret} = call_ctl(get_ctl(), {process_link, self(), Proc}),
+handle_erlang(link, [ProcOrPort], _Aux) ->
+    Ret =
+        if
+            is_pid(ProcOrPort) ->
+                case call_ctl(get_ctl(), {process_link, self(), ProcOrPort}) of
+                    {ok, noproc} ->
+                        error(noproc);
+                    {ok, badarg} ->
+                        error(badarg);
+                    {ok, InRet} ->
+                        InRet
+                end;
+            is_port(ProcOrPort) ->
+                link(ProcOrPort);
+            true ->
+                error(badarg)
+        end,
     Ret;
 %% misc
 %% handle_erlang(get_stacktrace, [], _Aux) ->
@@ -2352,8 +2375,21 @@ handle_erlang(exit, [Proc, Reason], {_Old, _New, Ann} = _Aux) ->
             Ret
     end;
 %% unlink
-handle_erlang(unlink, [Proc], _Aux) when is_pid(Proc) ->
-    {ok, Ret} = call_ctl(get_ctl(), {process_unlink, self(), Proc}),
+handle_erlang(unlink, [ProcOrPort], _Aux) ->
+    Ret =
+    if
+        is_pid(ProcOrPort) ->
+            case call_ctl(get_ctl(), {process_unlink, self(), ProcOrPort}) of
+                {ok, badarg} ->
+                    error(badarg);
+                {ok, InRet} ->
+                    InRet
+            end;
+        is_port(ProcOrPort) ->
+            unlink(ProcOrPort);
+        true ->
+            error(badarg)
+    end,
     Ret;
 %% apply
 handle_erlang(apply, [M, F, A], {Old, New, Ann}) ->
