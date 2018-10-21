@@ -294,8 +294,8 @@ start(M, F, A, Opts) ->
     {ok, ok} = ?ctl_call_node_created(Ctl, Node),
     {ok, Opt} = ?ctl_call_get_opt(Ctl),
     {ok, ShTab} = ?ctl_call_get_shtab(Ctl),
-    {ok, {NewM, Nifs}} = instrument_module(Ctl, M),
-    {ok, {NewGI, []}} = instrument_module(Ctl, morpheus_guest_internal),
+    {ok, {NewM, Nifs}} = ?ctl_call_instrument_module(Ctl, M),
+    {ok, {NewGI, []}} = ?ctl_call_instrument_module(Ctl, morpheus_guest_internal),
     RealM =
         case lists:member({F, length(A)}, Nifs) of
             true ->
@@ -328,9 +328,6 @@ call_ctl(Ctl, Args) ->
 
 cast_ctl(Ctl, Args) ->
     Ctl ! {cast, Args}.
-
-instrument_module(Ctl, M) ->
-    call_ctl(Ctl, {instrument, M}).
 
 ctl_check_heartbeat(#sandbox_state{opt = #sandbox_opt{heartbeat = HB}} = S) when is_integer(HB) ->
     ?INFO("ctl heartbeat:~n~s", [ctl_state_format(S)]),
@@ -1276,7 +1273,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S, {is_process_alive, Proc}) -
             {S, false}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                {process_send_exit, From, Where, Proc, Reason}) ->
+                {process_send_signal, From, Where, Proc, Reason}) ->
     case ?TABLE_GET(PT, {proc, Proc}) of
         {_, {alive, Props}} ->
             case Reason =/= kill andalso dict:find(trap_exit, Props) of
@@ -1843,7 +1840,7 @@ handle(Old, New, Tag, Args, Ann) ->
         {undet_nif_stub, [F, A]} ->
             %% ?INFO("undet nif ~p:~p/~p", [Old, F, length(A)]),
             R = apply(Old, F, A),
-            call_ctl(get_ctl(), {undet}),
+            ?ctl_call_undet(get_ctl()),
             R;
         {apply, [F, A]} ->
             case is_function(F) andalso erlang:fun_info(F, type) of
@@ -1972,7 +1969,7 @@ handle_undet_message(Ctl) ->
             ?INFO("~p got external message before blocking:~n  ~p", [self(), M]),
             %% At this moment, undet timeout is off, and this process is considered alive.
             %% we do not need to use {undet, ...} request to activate it again
-            call_ctl(Ctl, {process_send, undet, undefined, self(), M}),
+            ?ctl_call_send_msg(Ctl, undet, undefined, self(), M),
             handle_undet_message(Ctl)
     after
         0 ->
@@ -1988,7 +1985,7 @@ handle_receive(Ctl, Ref) ->
             handle_receive(Ctl, Ref);
         M ->
             ?INFO("~p received external message while blocking:~n  ~p", [self(), M]),
-            call_ctl(Ctl, {undet, {process_send, undet, undefined, self(), M}}),
+            ?ctl_call_undet_send_msg(Ctl, undet, undefined, self(), M),
             handle_receive(Ctl, Ref)
     end.
 
@@ -2026,7 +2023,7 @@ get_instrumented_module_info(Ctl, M) ->
     {ToUpdate, NewM, Nifs} =
         case dict:find(M, Dict) of
             error ->
-                {ok, {_NewM, _Nifs}} = instrument_module(Ctl, M),
+                {ok, {_NewM, _Nifs}} = ?ctl_call_instrument_module(Ctl, M),
                 {true, _NewM, sets:from_list(_Nifs)};
             {ok, {_NewM, _Nifs}} ->
                 {false, _NewM, _Nifs}
@@ -2167,7 +2164,7 @@ hibernate_entry(M, F, A) ->
 handle_erlang('!', [T, M], Aux) ->
     handle_erlang(send, [T, M], Aux);
 handle_erlang(send, [Pid, M], {_Old, _New, Ann}) when is_pid(Pid) ->
-    {ok, R} = call_ctl(get_ctl(), {process_send, self(), Ann, Pid, M}),
+    {ok, R} = ?ctl_call_send_msg(get_ctl(), self(), Ann, Pid, M),
     case R of
         ok ->
             M;
@@ -2184,7 +2181,7 @@ handle_erlang(send, [Name, Msg | Opts], {_Old, _New, Ann}) when is_atom(Name) ->
     case Ret of
         {_, Pid} when is_pid(Pid) ->
             %% assume lookup and send is atomic (actually not in Beam VM)
-            {ok, ok} = call_ctl(get_ctl(), {nodelay, {process_send, self(), Ann, Pid, Msg}}),
+            {ok, ok} = ?ctl_call_nodelay_send_msg(get_ctl(), self(), Ann, Pid, Msg),
             case Opts of
                 [] -> Msg;
                 _ -> ok
@@ -2199,7 +2196,7 @@ handle_erlang(send, [{Name, Node}, Msg | Opts], {_Old, _New, Ann}) when is_atom(
     case Ret of
         {_, Pid} when is_pid(Pid) ->
             %% assume lookup and send is atomic (actually not in Beam VM)
-            {ok, ok} = call_ctl(get_ctl(), {nodelay, {process_send, self(), Ann, Pid, Msg}}),
+            {ok, ok} = ?ctl_call_nodelay_send_msg(get_ctl(), self(), Ann, Pid, Msg),
             case Opts of
                 [] -> Msg;
                 _ -> ok
@@ -2372,7 +2369,7 @@ handle_erlang(exit, [Proc, Reason], {_Old, _New, Ann} = _Aux) ->
         Me ->
             handle_erlang(exit, [Reason], _Aux);
         _ ->
-            {ok, Ret} = call_ctl(get_ctl(), {process_send_exit, self(), Ann, Proc, Reason}),
+            {ok, Ret} = ?ctl_call_send_signal(get_ctl(), self(), Ann, Proc, Reason),
             Ret
     end;
 %% unlink
@@ -2489,23 +2486,23 @@ handle_erlang(phash2, [Term], _Aux) ->
     end;
 handle_erlang(open_port, A, _Aux) ->
     R = apply(erlang, open_port, A),
-    call_ctl(get_ctl(), {undet}),
+    ?ctl_call_undet(get_ctl()),
     R;
 handle_erlang(port_command, A, _Aux) ->
     R = apply(erlang, port_command, A),
-    call_ctl(get_ctl(), {undet}),
+    ?ctl_call_undet(get_ctl()),
     R;
 handle_erlang(port_connect, A, _Aux) ->
     R = apply(erlang, port_connect, A),
-    call_ctl(get_ctl(), {undet}),
+    ?ctl_call_undet(get_ctl()),
     R;
 handle_erlang(port_control, A, _Aux) ->
     R = apply(erlang, port_control, A),
-    call_ctl(get_ctl(), {undet}),
+    ?ctl_call_undet(get_ctl()),
     R;
 handle_erlang(port_close, A, _Aux) ->
     R = apply(erlang, port_close, A),
-    call_ctl(get_ctl(), {undet}),
+    ?ctl_call_undet(get_ctl()),
     R;
 %% Cannot be global
 handle_erlang(setnode, [Name, Creation], _Aux) ->
@@ -2831,7 +2828,7 @@ handle_ets(F, A, {_Old, _New, Ann}) ->
                         end,
                     Result = apply(ets, F, [RealTid, Pid, morpheus_internal]),
                     GiveMsg = {'ETS-TRANSFER', Tid, self(), GiftData},
-                    {ok, ok} = call_ctl(get_ctl(), {process_send, self(), Ann, Pid, GiveMsg}),
+                    {ok, ok} = ?ctl_call_send_msg(get_ctl(), self(), Ann, Pid, GiveMsg),
                     Result;
                 true ->
                     [Tid | Rest] = A,
