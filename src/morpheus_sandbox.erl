@@ -709,7 +709,7 @@ ctl_handle_call(#sandbox_state{opt = Opt} = S, ?cci_get_clock()) ->
         false ->
             {S, {erlang:monotonic_time(millisecond), erlang:time_offset(millisecond)}}
     end;
-ctl_handle_call(#sandbox_state{unique_integer = UI} = S, {unique_integer}) ->
+ctl_handle_call(#sandbox_state{unique_integer = UI} = S, ?cci_unique_integer()) ->
     {S#sandbox_state{unique_integer = UI + 1}, UI};
 ctl_handle_call(#sandbox_state{mod_table = MT} = S, ?cci_instrument_module(M)) ->
     case ?TABLE_GET(MT, M) of
@@ -1276,7 +1276,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S, ?cci_process_info(Proc, Pro
             _ -> undefined
         end,
     {S, Ret};
-ctl_handle_call(#sandbox_state{proc_table = PT} = S, {is_process_alive, Proc}) ->
+ctl_handle_call(#sandbox_state{proc_table = PT} = S, ?cci_is_process_alive(Proc)) ->
     case ?TABLE_GET(PT, {proc, Proc}) of
         undefined ->
             {S, erlang:is_process_alive(Proc)};
@@ -2304,16 +2304,16 @@ handle_erlang(whereis, [Name], _Aux) when is_atom(Name) ->
     end;
 %% monitor
 handle_erlang(monitor, [process, Pid], _Aux) when is_pid(Pid) ->
-    {ok, Ref} = call_ctl(get_ctl(), ?cci_process_monitor(self(), [], Pid)),
+    {ok, Ref} = ?cc_process_monitor(get_ctl(), self(), [], Pid),
     case Ref of
         badarg -> error(badarg);
         _ -> Ref
     end;
 handle_erlang(monitor, [process, Name], _Aux) when is_atom(Name) ->
-    {ok, Ref} = call_ctl(get_ctl(), ?cci_process_monitor(self(), [], {Name, get_node()})),
+    {ok, Ref} = ?cc_process_monitor(get_ctl(), self(), [], {Name, get_node()}),
     Ref;
 handle_erlang(monitor, [process, {Name, Node}], _Aux) when is_atom(Name), is_atom(Node) ->
-    {ok, Ref} = call_ctl(get_ctl(), ?cci_process_monitor(self(), get_node(), {Name, Node})),
+    {ok, Ref} = ?cc_process_monitor(get_ctl(), self(), get_node(), {Name, Node}),
     case Ref of
         badarg -> error(badarg);
         _ -> Ref
@@ -2325,10 +2325,10 @@ handle_erlang(monitor, [_OtherType, _Object], _Aux) ->
     make_ref();
 %% demonitor
 handle_erlang(demonitor, [Ref], _Aux) ->
-    {ok, Ret} = call_ctl(get_ctl(), ?cci_process_demonitor(self(), Ref, [])),
+    {ok, Ret} = ?cc_process_demonitor(get_ctl(), self(), Ref, []),
     Ret;
 handle_erlang(demonitor, [Ref, Opts], _Aux) ->
-    {ok, Ret} = call_ctl(get_ctl(), ?cci_process_demonitor(self(), Ref, Opts)),
+    {ok, Ret} = ?cc_process_demonitor(get_ctl(), self(), Ref, Opts),
     Ret;
 %% spawn
 handle_erlang(spawn, Args, _Aux) ->
@@ -2460,7 +2460,7 @@ handle_erlang(process_info, [Pid], _Aux) ->
     end;
 %% is_process_alive
 handle_erlang(is_process_alive, [Pid], _Aux) when is_pid(Pid) ->
-    {ok, Ret} = call_ctl(get_ctl(), {is_process_alive, Pid}),
+    {ok, Ret} = ?cc_is_process_alive(get_ctl(), Pid),
     Ret;
 %% processes
 handle_erlang(processes, [], _Aux) ->
@@ -2479,7 +2479,7 @@ handle_erlang(erase, [], _Aux) ->
                 end, [], erase());
 %% always return positive and monotonic integers ...
 handle_erlang(unique_integer, _Args, _Aux) ->
-    {ok, I} = call_ctl(get_ctl(), {unique_integer}),
+    {ok, I} = ?cc_unique_integer(get_ctl()),
     I;
 %% hibernate
 handle_erlang(hibernate, [M, F, A], _Aux) ->

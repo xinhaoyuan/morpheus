@@ -26,6 +26,8 @@
 -define(cci_process_info(Proc, Props), {process_info, Proc, Props}).
 -define(cci_resource_acquire(OpList), {resource_acquire, OpList}).
 -define(cci_resource_release(OpList), {resource_release, OpList}).
+-define(cci_is_process_alive(Proc), {is_process_alive, Proc}).
+-define(cci_unique_integer(), {unique_integer}).
 
 -define(cc_node_created(Ctl, Node),
         call_ctl(Ctl, ?cci_node_created(Node))).
@@ -82,6 +84,12 @@
 -define(cc_instrumented_registered_list(Ctl, Node),
         call_ctl(Ctl, ?cci_instrumented_registered_list(Node))).
 
+-define(cc_process_monitor(Ctl, Watcher, WatcherNode, Target),
+        call_ctl(Ctl, ?cci_process_monitor(Watcher, WatcherNode, Target))).
+
+-define(cc_process_demonitor(Ctl, Watcher, Ref, Opts),
+        call_ctl(Ctl, ?cci_process_demonitor(Watcher, Ref, Opts))).
+
 -define(cc_register_external_process(Ctl, Node, Name, Proc),
         call_ctl(Ctl, ?cci_register_external_process(Node, Name, Proc))).
 
@@ -108,3 +116,9 @@
 
 -define(cc_resource_release(Ctl, OpList),
         call_ctl(Ctl, ?cci_resource_release(OpList))).
+
+-define(cc_is_process_alive(Ctl, Proc),
+        call_ctl(Ctl, ?cci_is_process_alive(Proc))).
+
+-define(cc_unique_integer(Ctl),
+        call_ctl(Ctl, ?cci_unique_integer())).
