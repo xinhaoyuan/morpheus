@@ -49,3 +49,7 @@
 -define(cci_get_clock(), {get_clock}).
 -define(ctl_call_get_clock(Ctl),
         call_ctl(Ctl, ?cci_get_clock())).
+
+-define(cci_process_receive(Proc, PatFun, Timeout), {process_receive, Proc, PatFun, Timeout}).
+-define(ctl_call_process_receive(Ctl, Proc, PatFun, Timeout),
+        call_ctl(Ctl, ?cci_process_receive(Proc, PatFun, Timeout))).

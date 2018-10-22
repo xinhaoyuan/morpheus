@@ -626,7 +626,7 @@ ctl_call_to_delay(true, {resource_acquire, _}) -> false;
 ctl_call_to_delay(true, ?cci_instrument_module(_)) -> false;
 ctl_call_to_delay(true, ?cci_node_created(_)) -> false;
 ctl_call_to_delay(true, {instrumented_process_created, _, _}) -> false;
-ctl_call_to_delay(true, {process_receive, _, _, _}) -> false;
+ctl_call_to_delay(true, ?cci_process_receive(_, _, _)) -> false;
 %% ctl_call_to_delay(true, {receive_timeout, _, _}) -> false;
 %% to delay?
 ctl_call_to_delay(true, ?cci_get_clock()) -> false;
@@ -1137,7 +1137,7 @@ ctl_handle_call(#sandbox_state{ opt = _Opt
                               , proc_table = PT
                               , proc_shtable = SHT
                               , alive_counter = AC} = S,
-                {process_receive, Proc, PatFun, Timeout}) ->
+                ?cci_process_receive(Proc, PatFun, Timeout)) ->
     Ref = make_ref(),
     case ?SHTABLE_GET(SHT, {exit, Proc}) of
         undefined ->
@@ -1914,7 +1914,7 @@ handle(Old, New, Tag, Args, Ann) ->
                 {ok, false} ->
                     ok
             end,
-            {ok, Ref} = call_ctl(Ctl, {process_receive, self(), PatFun, Timeout}),
+            {ok, Ref} = ?ctl_call_process_receive(Ctl, self(), PatFun, Timeout),
             R = handle_receive(Ctl, Ref),
             #sandbox_opt{trace_receive = TraceReceive} = Opt,
             ToTrace =
