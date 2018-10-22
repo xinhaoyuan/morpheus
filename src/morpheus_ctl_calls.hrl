@@ -21,6 +21,8 @@
 -define(cci_register_process(Node, Name, Proc), {register_process, Node, Name, Proc}).
 -define(cci_unregister(Node, Name), {unregister, Node, Name}).
 -define(cci_whereis(FromNode, Node, Name), {whereis, FromNode, Node, Name}).
+-define(cci_list_nodes(FromNode, Label), {list_nodes, FromNode, Label}).
+-define(cci_process_set_trap_exit(Proc, On), {process_set_trap_exit, Proc, On}).
 
 -define(cc_node_created(Ctl, Node),
         call_ctl(Ctl, ?cci_node_created(Node))).
@@ -88,3 +90,10 @@
 
 -define(cc_whereis(Ctl, FromNode, Node, Name),
         call_ctl(Ctl, ?cci_whereis(FromNode, Node, Name))).
+
+-define(cc_list_nodes(Ctl, FromNode, Label),
+        call_ctl(Ctl, ?cci_list_nodes(FromNode, Label))).
+
+-define(cc_process_set_trap_exit(Ctl, Proc, On),
+        call_ctl(Ctl, ?cci_process_set_trap_exit(Proc, On))).
+

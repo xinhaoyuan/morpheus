@@ -826,7 +826,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             {S, false}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                {list_nodes, FromNode, Label}) ->
+                ?cci_list_nodes(FromNode, Label)) ->
     {_, {Status, _}} = ?TABLE_GET(PT, {node, FromNode}),
     case Label of
         this ->
@@ -1046,7 +1046,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             end
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                {process_set_trap_exit, Proc, On}) ->
+                ?cci_process_set_trap_exit(Proc, On)) ->
     case ?TABLE_GET(PT, {proc, Proc}) of
         {_, {alive, Props}} ->
             Prev =
@@ -2328,7 +2328,7 @@ handle_erlang(spawn_opt, Args, _Aux) ->
     apply(?MODULE, handle_erlang_spawn_opt, Args);
 %% process_flag trap_exit
 handle_erlang(process_flag, [trap_exit, On], _Aux) ->
-    {ok, {prev, Prev}} = call_ctl(get_ctl(), {process_set_trap_exit, self(), On}),
+    {ok, {prev, Prev}} = ?cc_process_set_trap_exit(get_ctl(), self(), On),
     Prev;
 %% link
 handle_erlang(link, [ProcOrPort], _Aux) ->
@@ -2526,7 +2526,7 @@ handle_erlang(monitor_node, [_Node, _Flag, _Options], _Aux) ->
 handle_erlang(nodes, [], _Aux) ->
     handle_erlang(nodes, [visible], _Aux);
 handle_erlang(nodes, [L], _Aux) ->
-    {ok, Ret} = call_ctl(get_ctl(), {list_nodes, get_node(), L}),
+    {ok, Ret} = ?cc_list_nodes(get_ctl(), get_node(), L),
     Ret;
 %%
 handle_erlang(node, [], _Aux) ->
