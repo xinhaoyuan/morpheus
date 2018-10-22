@@ -2052,7 +2052,7 @@ instrumented_process_created(Ctl, ShTab, Node, Proc) ->
                 {pid, Node, [C | PList]}
         end,
     ?SHTABLE_SET(ShTab, {abs_id, Proc}, NewAbsId),
-    {ok, ok} = call_ctl(Ctl, ?cci_instrumented_process_created(Node, Proc)).
+    {ok, ok} = ?cc_instrumented_process_created(Ctl, Node, Proc).
 
 instrumented_process_kick(_Ctl, _Node, Proc) ->
     Proc ! start.
@@ -2176,7 +2176,7 @@ handle_erlang(send, [Pid, M, _Opts], _Aux) when is_pid(Pid) ->
     handle_erlang(send, [Pid, M], _Aux),
     ok;
 handle_erlang(send, [Name, Msg | Opts], {_Old, _New, Ann}) when is_atom(Name) ->
-    {ok, Ret} = call_ctl(get_ctl(), ?cci_whereis([], get_node(), Name)),
+    {ok, Ret} = ?cc_whereis(get_ctl(), [], get_node(), Name),
     case Ret of
         {_, Pid} when is_pid(Pid) ->
             %% assume lookup and send is atomic (actually not in Beam VM)
@@ -2191,7 +2191,7 @@ handle_erlang(send, [Name, Msg | Opts], {_Old, _New, Ann}) when is_atom(Name) ->
             error(badarg)
     end;
 handle_erlang(send, [{Name, Node}, Msg | Opts], {_Old, _New, Ann}) when is_atom(Node), is_atom(Name) ->
-    {ok, Ret} = call_ctl(get_ctl(), ?cci_whereis(get_node(), Node, Name)),
+    {ok, Ret} = ?cc_whereis(get_ctl(), get_node(), Node, Name),
     case Ret of
         {_, Pid} when is_pid(Pid) ->
             %% assume lookup and send is atomic (actually not in Beam VM)
@@ -2270,19 +2270,19 @@ handle_erlang(convert_time_unit, [N, From, To], _Ann) ->
     erlang:convert_time_unit(N, NewFrom, NewTo);
 %% register/unregister/whereis
 handle_erlang(register, [Name, Pid], _Aux) when is_atom(Name), is_pid(Pid) ->
-    {ok, Ret} = call_ctl(get_ctl(), ?cci_register_process(get_node(), Name, Pid)),
+    {ok, Ret} = ?cc_register_process(get_ctl(), get_node(), Name, Pid),
     case Ret of
         badarg -> error(badarg);
         _ -> Ret
     end;
 handle_erlang(unregister, [Name], _Aux) when is_atom(Name) ->
-    {ok, Ret} = call_ctl(get_ctl(), ?cci_unregister(get_node(), Name)),
+    {ok, Ret} = ?cc_unregister(get_ctl(), get_node(), Name),
     case Ret of
         badarg -> error(badarg);
         _ -> Ret
     end;
 handle_erlang(whereis, [Name], _Aux) when is_atom(Name) ->
-    {ok, Ret} = call_ctl(get_ctl(), ?cci_whereis([], get_node(), Name)),
+    {ok, Ret} = ?cc_whereis(get_ctl(), [], get_node(), Name),
     case Ret of
         {_, Pid} ->
             Pid;
@@ -2451,10 +2451,10 @@ handle_erlang(is_process_alive, [Pid], _Aux) when is_pid(Pid) ->
     Ret;
 %% processes
 handle_erlang(processes, [], _Aux) ->
-    {ok, Ret} = call_ctl(get_ctl(), ?cci_instrumented_process_list(get_node())),
+    {ok, Ret} = ?cc_instrumented_process_list(get_ctl(), get_node()),
     Ret;
 handle_erlang(registered, [], _Aux) ->
-    {ok, Ret} = call_ctl(get_ctl(), ?cci_instrumented_registered_list(get_node())),
+    {ok, Ret} = ?cc_instrumented_registered_list(get_ctl(), get_node()),
     Ret;
 handle_erlang(erase, [], _Aux) ->
     %% Keep sandbox info after erase

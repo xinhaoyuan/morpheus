@@ -68,5 +68,23 @@
 -define(cc_process_on_exit(Ctl, Proc, Reason),
         call_ctl(Ctl, ?cci_process_on_exit(Proc, Reason))).
 
+-define(cc_instrumented_process_created(Ctl, Node, Proc),
+        call_ctl(Ctl, ?cci_instrumented_process_created(Node, Proc))).
+
+-define(cc_instrumented_process_list(Ctl, Node),
+        call_ctl(Ctl, ?cci_instrumented_process_list(Node))).
+
+-define(cc_instrumented_registered_list(Ctl, Node),
+        call_ctl(Ctl, ?cci_instrumented_registered_list(Node))).
+
 -define(cc_register_external_process(Ctl, Node, Name, Proc),
         call_ctl(Ctl, ?cci_register_external_process(Node, Name, Proc))).
+
+-define(cc_register_process(Ctl, Node, Name, Proc),
+        call_ctl(Ctl, ?cci_register_process(Node, Name, Proc))).
+
+-define(cc_unregister(Ctl, Node, Name),
+        call_ctl(Ctl, ?cci_unregister(Node, Name))).
+
+-define(cc_whereis(Ctl, FromNode, Node, Name),
+        call_ctl(Ctl, ?cci_whereis(FromNode, Node, Name))).
