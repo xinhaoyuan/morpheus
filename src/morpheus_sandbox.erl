@@ -1209,7 +1209,7 @@ ctl_handle_call(#sandbox_state{ opt = _Opt
     end;
 ctl_handle_call(S, ?cci_send_msg(From, Where, To, M)) ->
     ctl_process_send(S, From, Where, To, M);
-ctl_handle_call(#sandbox_state{proc_table = PT} = S, {process_info, Proc, Props}) ->
+ctl_handle_call(#sandbox_state{proc_table = PT} = S, ?cci_process_info(Proc, Props)) ->
     Ret =
         case ?TABLE_GET(PT, {proc, Proc}) of
             {_, {alive, _}} ->
@@ -1254,6 +1254,19 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S, {process_info, Proc, Props}
                                                 LList
                                         end,
                                     [{links, R} | Acc];
+                                (dictionary, Acc) ->
+                                    {dictionary, R0} = erlang:process_info(Proc, dictionary),
+                                    R =
+                                        lists:foldr(
+                                          fun({K, _} = KV, IAcc) ->
+                                                  case ?IS_INTERNAL_PDK(K) of
+                                                      true ->
+                                                          IAcc;
+                                                      false ->
+                                                          [KV | IAcc]
+                                                  end
+                                          end, [], R0),
+                                    [{dictionary, R} | Acc];
                                 (Item, Acc) ->
                                     case erlang:process_info(Proc, Item) of
                                         undefined -> Acc;
@@ -1387,7 +1400,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             ?WARNING("process_on_exit for unknown proc", []),
             {S, noproc}
     end;
-ctl_handle_call(#sandbox_state{res_table = ResTable} = S, {resource_acquire, OpList}) ->
+ctl_handle_call(#sandbox_state{res_table = ResTable} = S, ?cci_resource_acquire(OpList)) ->
     {NewResTable, InfoAcc} =
         lists:foldr(
           fun ({ResType, Start, Size, OpType} = OpInfo, {CurResTable, InfoAcc}) ->
@@ -1420,7 +1433,7 @@ ctl_handle_call(#sandbox_state{res_table = ResTable} = S, {resource_acquire, OpL
                   end
           end, {ResTable, []}, OpList),
     {S#sandbox_state{res_table = NewResTable}, InfoAcc};
-ctl_handle_call(#sandbox_state{res_table = ResTable} = S, {resource_release, OpList}) ->
+ctl_handle_call(#sandbox_state{res_table = ResTable} = S, ?cci_resource_release(OpList)) ->
     NewResTable =
         lists:foldr(
           fun ({ResType, _, _, _} = OpInfo, CurResTable) ->
@@ -2407,7 +2420,7 @@ handle_erlang(apply, [F, A], {Old, New, Ann}) ->
 %% process_info virtualization is very limited now, as there are simply too many stuff ...
 %% So far this is for running some tests (i.e. poolboy)
 handle_erlang(process_info, [Pid, Prop], _Aux) when is_atom(Prop) ->
-    {ok, Ret} = call_ctl(get_ctl(), {process_info, Pid, [Prop]}),
+    {ok, Ret} = ?cc_process_info(get_ctl(), Pid, [Prop]),
     case Ret of
         [] ->
             undefined;
@@ -2420,17 +2433,17 @@ handle_erlang(process_info, [Pid, Prop], _Aux) when is_atom(Prop) ->
             ItemTuple
     end;
 handle_erlang(process_info, [Pid, PropList], _Aux) when is_list(PropList) ->
-    {ok, Ret} = call_ctl(get_ctl(), {process_info, Pid, PropList}),
+    {ok, Ret} = ?cc_process_info(get_ctl(), Pid, PropList),
     Ret;
 handle_erlang(process_info, [Pid], _Aux) ->
-    {ok, Ret} = call_ctl(get_ctl(), {process_info, Pid,
-                                     %% all virtualized items that are supposed to return
-                                     [registered_name,
-                                      monitors,
-                                      monitored_by,
-                                      links,
-                                      %% no need for messages, since it's not returned in this call
-                                      message_queue_len]}),
+    {ok, Ret} = ?cc_process_info(get_ctl(), Pid,
+                                 %% all virtualized items that are supposed to return
+                                 [registered_name,
+                                  monitors,
+                                  monitored_by,
+                                  links,
+                                  %% no need for messages, since it's not returned in this call
+                                  message_queue_len]),
     Original = erlang:process_info(Pid),
     case Ret of
         undefined ->
@@ -2541,6 +2554,24 @@ handle_erlang(put, [K, V], _Aux) ->
         false ->
             erlang:put(K, V)
     end;
+handle_erlang(get, [K], _Aux) ->
+    case ?IS_INTERNAL_PDK(K) of
+        true ->
+            ?ERROR("Guest trying to get internal pdk ~w. Ignored.", [K]),
+            undefined;
+        false ->
+            erlang:get(K)
+    end;
+handle_erlang(get, [], _Aux) ->
+    lists:foldr(
+      fun({K, _} = KV, Acc) ->
+              case ?IS_INTERNAL_PDK(K) of
+                  true ->
+                      Acc;
+                  false ->
+                      [KV | Acc]
+              end
+      end, [], erlang:get());
 handle_erlang(F, A, _Aux) ->
     apply(erlang, F, A).
 
@@ -2708,14 +2739,14 @@ handle_io(F, A, _Aux) ->
 
 detect_file_op_race(IoDev, Start, Size, Type) ->
     IOList = [{{iodev, IoDev}, Start, Size, Type}],
-    {ok, R} = call_ctl(get_ctl(), {resource_acquire, IOList}),
+    {ok, R} = ?cc_resource_acquire(get_ctl(), IOList),
     case R of
         [] -> ok;
         _ ->
             {_, _, ST} = ?CATCH( throw(gimme_stacktrace) ),
             ?WARNING("Race on file operation found~nStack: ~p", [ST])
     end,
-    {ok, ok} = call_ctl(get_ctl(), {resource_release, IOList}).
+    {ok, ok} = ?cc_resource_release(get_ctl(), IOList).
 
 handle_file(F, A, _Aux) ->
     case F of

@@ -23,6 +23,9 @@
 -define(cci_whereis(FromNode, Node, Name), {whereis, FromNode, Node, Name}).
 -define(cci_list_nodes(FromNode, Label), {list_nodes, FromNode, Label}).
 -define(cci_process_set_trap_exit(Proc, On), {process_set_trap_exit, Proc, On}).
+-define(cci_process_info(Proc, Props), {process_info, Proc, Props}).
+-define(cci_resource_acquire(OpList), {resource_acquire, OpList}).
+-define(cci_resource_release(OpList), {resource_release, OpList}).
 
 -define(cc_node_created(Ctl, Node),
         call_ctl(Ctl, ?cci_node_created(Node))).
@@ -97,3 +100,11 @@
 -define(cc_process_set_trap_exit(Ctl, Proc, On),
         call_ctl(Ctl, ?cci_process_set_trap_exit(Proc, On))).
 
+-define(cc_process_info(Ctl, Proc, Props),
+        call_ctl(Ctl, ?cci_process_info(Proc, Props))).
+
+-define(cc_resource_acquire(Ctl, OpList),
+        call_ctl(Ctl, ?cci_resource_acquire(OpList))).
+
+-define(cc_resource_release(Ctl, OpList),
+        call_ctl(Ctl, ?cci_resource_release(OpList))).
