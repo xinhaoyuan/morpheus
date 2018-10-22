@@ -2009,7 +2009,7 @@ handle_signals() ->
             %% cannot throw exit since it may be caught by the guest ...
             ?DEBUG("~p get exit signal ~p", [self(), Reason]),
             ?SHTABLE_REMOVE(ShTab, {exit, self()}),
-            ?ctl_call_process_on_exit(get_ctl(), self(), Reason))
+            ?ctl_call_process_on_exit(get_ctl(), self(), Reason),
             become_tomb()
     end.
 
