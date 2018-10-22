@@ -53,6 +53,8 @@
              _ -> false
          end)).
 
+-type abs_id() :: integer().
+
 -record(sandbox_opt,
         { verbose_ctl_req       :: boolean()
         , verbose_handle        :: boolean()
@@ -81,13 +83,13 @@
         , proc_table       :: ?TABLE_TYPE()
         , proc_shtable     :: ?SHTABLE_TYPE()
         , res_table        :: dict:dict()
-        , abs_id_table     :: dict:dict()
-        , abs_id_counter   :: integer()
+        , abs_id_table     :: dict:dict(pid(), abs_id())
+        , abs_id_counter   :: abs_id()
         , transient_counter:: integer()
         , alive            :: [pid()]
         , alive_counter    :: integer()
         , buffer_counter   :: integer()
-        , buffer           :: [{integer(), #fd_delay_req{}, term()}]
+        , buffer           :: [{abs_id(), #fd_delay_req{}, term()}]
         , waiting_counter  :: integer()
         , waiting          :: dict:dict()
         , vclock_offset    :: integer()
@@ -502,6 +504,16 @@ ctl_pop_request_from_buffer(#sandbox_state{waiting_counter = WC, waiting = Waiti
             end
     end.
 
+ctl_push_request_to_scheduler(#sandbox_state{opt = #sandbox_opt{fd_scheduler = Sched}} = S,
+                              Req) when Sched =/= undefined ->
+    Sched ! Req,
+    S.
+
+ctl_notify_scheduler(#sandbox_state{opt = #sandbox_opt{fd_scheduler = Sched}} = S)
+  when Sched =/= undefined ->
+    Sched ! fd_notify_idle,
+    S.
+
 ctl_check_and_receive(#sandbox_state{initial = true} = S) ->
     receive M -> {S, M} end;
 ctl_check_and_receive(#sandbox_state{opt = Opt,
@@ -537,9 +549,9 @@ ctl_check_and_receive(#sandbox_state{opt = Opt,
                         #sandbox_state{buffer = Buffer} = S,
                         #sandbox_opt{fd_scheduler = Sched, aux_module = Aux} = Opt,
                         SortedBuffer = lists:keysort(1, Buffer),
-                        {_, ToNotify} =
+                        {S1, _, ToNotify} =
                             lists:foldl(
-                              fun ({AID, DelayReq, OriginReq}, {LastAID, ToNotify}) ->
+                              fun ({AID, DelayReq, OriginReq}, {CurS, LastAID, ToNotify}) ->
                                       case LastAID of
                                           AID ->
                                               ?ERROR("Buffered requests with the same AID. This may lead to non-determinism", []);
@@ -551,20 +563,20 @@ ctl_check_and_receive(#sandbox_state{opt = Opt,
                                             not erlang:function_exported(Aux, to_delay_call, 4),
                                             OriginReq) of
                                           true ->
-                                              Sched ! DelayReq,
-                                              {AID, ToNotify};
+                                              {ctl_push_request_to_scheduler(CurS, DelayReq), AID, ToNotify};
                                           false ->
                                               self() ! #fd_delay_resp{ref = DelayReq#fd_delay_req.ref},
-                                              {AID, false}
+                                              {CurS, AID, false}
                                       end
-                              end, {undefined, true}, SortedBuffer),
+                              end,
+                              {S#sandbox_state{buffer = [], buffer_counter = 0}, undefined, true},
+                              SortedBuffer),
                         case (Sched =/= undefined) andalso ToNotify of
                             true ->
-                                Sched ! fd_notify_idle;
+                                ctl_notify_scheduler(S1);
                             false ->
-                                ok
-                        end,
-                        S#sandbox_state{buffer = [], buffer_counter = 0};
+                                S1
+                        end;
                     AC =:= 0,
                     UndetSigs =< 0,
                     BC =:= 0,
