@@ -629,7 +629,7 @@ ctl_call_to_delay(true, {instrumented_process_created, _, _}) -> false;
 ctl_call_to_delay(true, {process_receive, _, _, _}) -> false;
 %% ctl_call_to_delay(true, {receive_timeout, _, _}) -> false;
 %% to delay?
-ctl_call_to_delay(true, {get_clock}) -> false;
+ctl_call_to_delay(true, ?cci_get_clock()) -> false;
 ctl_call_to_delay(true, _) -> true;
 %%%%
 ctl_call_to_delay(false, {delay}) -> true;
@@ -675,7 +675,7 @@ ctl_handle_call(S, ?cci_initial_kick()) ->
     {S#sandbox_state{initial = false}, ok};
 ctl_handle_call(S, {ets_op}) ->
     {S, ok};
-ctl_handle_call(#sandbox_state{proc_table = PT} = S, {ets_all}) ->
+ctl_handle_call(#sandbox_state{proc_table = PT} = S, ?cci_ets_all()) ->
     Ret = lists:foldr(
             fun (Tab, Acc) ->
                     Owner = ets:info(Tab, owner),
@@ -701,7 +701,7 @@ ctl_handle_call(#sandbox_state{opt = Opt} = S, ?cci_get_opt()) ->
     {S, Opt};
 ctl_handle_call(#sandbox_state{proc_shtable = ShTab} = S, ?cci_get_shtab()) ->
     {S, ShTab};
-ctl_handle_call(#sandbox_state{opt = Opt} = S, {get_clock}) ->
+ctl_handle_call(#sandbox_state{opt = Opt} = S, ?cci_get_clock()) ->
     case Opt#sandbox_opt.control_timeouts of
         true ->
             #sandbox_state{vclock = VC, vclock_offset = VCO} = S,
@@ -2224,7 +2224,7 @@ handle_erlang(send_after, A, {Old, New, Ann}) ->
 %% timestamp virtualization. We are also emulating the native time unit to be `millisecond`.
 %% We hope this would be enough
 handle_erlang(monotonic_time, A, _Ann) ->
-    {ok, {Clock, _Offset}} = call_ctl(get_ctl(), {get_clock}),
+    {ok, {Clock, _Offset}} = ?ctl_call_get_clock(get_ctl()),
     case A of
         [] -> Clock;
         [native] -> Clock;
@@ -2232,7 +2232,7 @@ handle_erlang(monotonic_time, A, _Ann) ->
             erlang:convert_time_unit(Clock, millisecond, Unit)
     end;
 handle_erlang(system_time, A, _Ann) when length(A) =< 1 ->
-    {ok, {Clock, Offset}} = call_ctl(get_ctl(), {get_clock}),
+    {ok, {Clock, Offset}} = ?ctl_call_get_clock(get_ctl()),
     SClock = Clock + Offset,
     case A of
         [] -> SClock;
@@ -2241,7 +2241,7 @@ handle_erlang(system_time, A, _Ann) when length(A) =< 1 ->
             erlang:convert_time_unit(SClock, millisecond, Unit)
     end;
 handle_erlang(time_offset, A, _Ann) when length(A) =< 1 ->
-    {ok, {_Clock, Offset}} = call_ctl(get_ctl(), {get_clock}),
+    {ok, {_Clock, Offset}} = ?ctl_call_get_clock(get_ctl()),
     case A of
         [] -> Offset;
         [native] -> Offset;
@@ -2249,7 +2249,7 @@ handle_erlang(time_offset, A, _Ann) when length(A) =< 1 ->
             erlang:convert_time_unit(Offset, millisecond, Unit)
     end;
 handle_erlang(timestamp, [], _Ann) ->
-    {ok, {Clock, Offset}} = call_ctl(get_ctl(), {get_clock}),
+    {ok, {Clock, Offset}} = ?ctl_call_get_clock(get_ctl()),
     SClock = Clock + Offset,
     MegaSecs = SClock div 1000000000,
     Secs = SClock div 1000 - MegaSecs * 1000000,
@@ -2743,7 +2743,7 @@ handle_file(F, A, _Aux) ->
 handle_ets(F, A, {_Old, _New, Ann}) ->
     case F of
         all ->
-            {ok, Ret} = call_ctl(get_ctl(), {maybe_delay, {ets_all}}),
+            {ok, Ret} = ?ctl_call_ets_all(get_ctl()),
             lists:map(fun (Name) ->
                         if
                             is_atom(Name) ->

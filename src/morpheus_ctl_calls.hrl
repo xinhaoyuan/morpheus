@@ -41,3 +41,11 @@
 -define(cci_process_unlink(From, To), {process_unlink, From, To}).
 -define(ctl_call_process_unlink(Ctl, From, To),
         call_ctl(Ctl, ?cci_process_unlink(From, To))).
+
+-define(cci_ets_all(), {ets_all}).
+-define(ctl_call_ets_all(Ctl),
+        call_ctl(Ctl, ?cci_ets_all())).
+
+-define(cci_get_clock(), {get_clock}).
+-define(ctl_call_get_clock(Ctl),
+        call_ctl(Ctl, ?cci_get_clock())).
