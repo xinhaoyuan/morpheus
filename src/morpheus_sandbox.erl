@@ -1290,7 +1290,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             {S, true}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                {process_on_exit, Proc, Reason}) ->
+                ?cci_process_on_exit(Proc, Reason)) ->
     case ?TABLE_GET(PT, {proc, Proc}) of
         {_, {alive, _Props}} ->
             unlink(Proc),
@@ -2009,7 +2009,7 @@ handle_signals() ->
             %% cannot throw exit since it may be caught by the guest ...
             ?DEBUG("~p get exit signal ~p", [self(), Reason]),
             ?SHTABLE_REMOVE(ShTab, {exit, self()}),
-            call_ctl(get_ctl(), {process_on_exit, self(), Reason}),
+            ?ctl_call_process_on_exit(get_ctl(), self(), Reason))
             become_tomb()
     end.
 
@@ -2100,16 +2100,15 @@ instrumented_process_end(V) ->
     before_tomb(),
     case V of
         {ok, _Value} ->
-            call_ctl(get_ctl(), {process_on_exit, self(), normal}),
-            ok;
+            ?ctl_call_process_on_exit(get_ctl(), self(), normal);
         {exit, R, _} ->
-            call_ctl(get_ctl(), {process_on_exit, self(), R});
+            ?ctl_call_process_on_exit(get_ctl(), self(), R);
         {error, R, ST} ->
             ?WARNING("Process ~p abort with ~p", [self(), V]),
-            call_ctl(get_ctl(), {process_on_exit, self(), {R, ST}});
+            ?ctl_call_process_on_exit(get_ctl(), self(), {R, ST});
         {throw, R, ST} ->
             ?WARNING("Process ~p abort with ~p", [self(), V]),
-            call_ctl(get_ctl(), {process_on_exit, self(), {{nocatch, R}, ST}})
+            ?ctl_call_process_on_exit(get_ctl(), self(), {{nocatch, R}, ST})
     end,
     become_tomb().
 
