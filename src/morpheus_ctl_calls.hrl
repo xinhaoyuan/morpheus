@@ -57,3 +57,9 @@
 -define(cci_process_on_exit(Proc, Reason), {process_on_exit, Proc, Reason}).
 -define(ctl_call_process_on_exit(Ctl, Proc, Reason),
         call_ctl(Ctl, ?cci_process_on_exit(Proc, Reason))).
+
+-define(cci_instrumented_process_created(Node, Proc), {instrumented_process_created, Node, Proc}).
+
+-define(cci_instrumented_process_list(Node), {instrumented_process_list, Node}).
+
+-define(cci_instrumented_registered_list(Node), {instrumented_registered_list, Node}).

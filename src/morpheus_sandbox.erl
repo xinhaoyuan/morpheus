@@ -625,7 +625,7 @@ ctl_call_to_delay(true, ?cci_get_opt()) -> false;
 ctl_call_to_delay(true, {resource_acquire, _}) -> false;
 ctl_call_to_delay(true, ?cci_instrument_module(_)) -> false;
 ctl_call_to_delay(true, ?cci_node_created(_)) -> false;
-ctl_call_to_delay(true, {instrumented_process_created, _, _}) -> false;
+ctl_call_to_delay(true, ?cci_instrumented_process_created(_, _)) -> false;
 ctl_call_to_delay(true, ?cci_process_receive(_, _, _)) -> false;
 %% ctl_call_to_delay(true, {receive_timeout, _, _}) -> false;
 %% to delay?
@@ -857,7 +857,7 @@ ctl_handle_call(#sandbox_state
                 , abs_id_counter = AIDC
                 , transient_counter = TC
                 , alive_counter = AC} = S,
-                {instrumented_process_created, Node, Proc}) ->
+                ?cci_instrumented_process_created(Node, Proc)) ->
     case {?TABLE_GET(PT, {proc, Proc}), ?TABLE_GET(PT, {node, Node})} of
         {{_, _}, _} ->
             ?ERROR("instrumented_process_created happened twice", []),
@@ -898,13 +898,13 @@ ctl_handle_call(#sandbox_state
             {S, badarg}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                {instrumented_process_list, Node}) ->
+                ?cci_instrumented_process_list(Node)) ->
     {S, case ?TABLE_GET(PT, {node_procs, Node}) of
             {_, L} -> L;
             undefined -> []
         end};
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                {instrumented_registered_list, Node}) ->
+                ?cci_instrumented_registered_list(Node)) ->
     %% XXX make it faster?
     NameList = ?TABLE_FOLD(
                   PT,
@@ -2052,7 +2052,7 @@ instrumented_process_created(Ctl, ShTab, Node, Proc) ->
                 {pid, Node, [C | PList]}
         end,
     ?SHTABLE_SET(ShTab, {abs_id, Proc}, NewAbsId),
-    {ok, ok} = call_ctl(Ctl, {instrumented_process_created, Node, Proc}).
+    {ok, ok} = call_ctl(Ctl, ?cci_instrumented_process_created(Node, Proc)).
 
 instrumented_process_kick(_Ctl, _Node, Proc) ->
     Proc ! start.
@@ -2451,10 +2451,10 @@ handle_erlang(is_process_alive, [Pid], _Aux) when is_pid(Pid) ->
     Ret;
 %% processes
 handle_erlang(processes, [], _Aux) ->
-    {ok, Ret} = call_ctl(get_ctl(), {instrumented_process_list, get_node()}),
+    {ok, Ret} = call_ctl(get_ctl(), ?cci_instrumented_process_list(get_node())),
     Ret;
 handle_erlang(registered, [], _Aux) ->
-    {ok, Ret} = call_ctl(get_ctl(), {instrumented_registered_list, get_node()}),
+    {ok, Ret} = call_ctl(get_ctl(), ?cci_instrumented_registered_list(get_node())),
     Ret;
 handle_erlang(erase, [], _Aux) ->
     %% Keep sandbox info after erase
