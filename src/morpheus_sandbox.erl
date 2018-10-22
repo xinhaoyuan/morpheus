@@ -919,7 +919,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
                   end, []),
     {S, NameList};
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                {process_link, PA, PB}) ->
+                ?cci_process_link(PA, PB)) ->
     case {?TABLE_GET(PT, {linking, PA}), ?TABLE_GET(PT, {linking, PB})} of
         {{_, LA}, {_, LB}} ->
             case PA =/= PB andalso ?TABLE_GET(PT, {link, PA, PB}) of
@@ -965,7 +965,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             end
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                {process_unlink, PA, PB}) ->
+                ?cci_process_unlink(PA, PB)) ->
     case PA =/= PB andalso ?TABLE_GET(PT, {link, PA, PB}) of
         false ->
             {S, true};
@@ -993,7 +993,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
     end;
 %%% For name based monitoring, I'm not sure how to handle node name regarding to offline/online switch.
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                {process_monitor, Watcher, FromNode, {TName, TNode}}) ->
+                ?cci_process_monitor(Watcher, FromNode, {TName, TNode})) ->
     case FromNode of
         [] ->
             ctl_monitor_proc(S, Watcher, {TName, TNode}, {TName, TNode});
@@ -1007,10 +1007,10 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
                     {S, badarg}
             end
     end;
-ctl_handle_call(S, {process_monitor, Watcher, [], Target}) ->
+ctl_handle_call(S, ?cci_process_monitor(Watcher, [], Target)) ->
     ctl_monitor_proc(S, Watcher, Target, Target);
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                {process_demonitor, Proc, Ref, Opts}) ->
+                ?cci_process_demonitor(Proc, Ref, Opts)) ->
     case ?TABLE_GET(PT, {monitor, Ref}) of
         {_, {Watcher, Target, _Object}} ->
             {{_, MList}, {_, WList}} =
@@ -1065,7 +1065,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             {S, noproc}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                {register_process, Node, Name, Proc}) ->
+                ?cci_register_process(Node, Name, Proc)) ->
     case ?TABLE_GET(PT, {name, Proc}) of
         {_, {Node, []}} ->
             case ?TABLE_GET(PT, {reg, Node, Name}) of
@@ -1087,7 +1087,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             {S, badarg}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                {register_external_process, Node, Name, Proc}) ->
+                ?cci_register_external_process(Node, Name, Proc)) ->
     case ?TABLE_GET(PT, {reg, Node, Name}) of
         {_, _} ->
             {S, badarg};
@@ -1097,7 +1097,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             {S#sandbox_state{proc_table = PT1}, true}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                {unregister, Node, Name}) ->
+                ?cci_unregister(Node, Name)) ->
     case ?TABLE_GET(PT, {reg, Node, Name}) of
         {_, {proc, Proc}} ->
             PT0 = case ?TABLE_GET(PT, {name, Proc}) of
@@ -1113,7 +1113,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             {S, badarg}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                {whereis, FromNode, Node, Name}) ->
+                ?cci_whereis(FromNode, Node, Name)) ->
     Node0 =
         case FromNode of
             [] -> Node;
@@ -1873,7 +1873,7 @@ handle(Old, New, Tag, Args, Ann) ->
             %% HACK to skip re-creating user process - forwarding io_request to the real user process.
             %% XXX message from user may lead to non-determinism
             RealUser = erlang:whereis(user),
-            {ok, true} = call_ctl(get_ctl(), {register_external_process, get_node(), user, RealUser}),
+            {ok, true} = call_ctl(get_ctl(), ?cci_register_external_process(get_node(), user, RealUser)),
             RealUser;
         {call, [logger_simple_h, changing_config, _A]} ->
             %% HACK - changing_config does not exist in logger_simple_h, but will be called in bootstrap process - just to workaround it.
@@ -2176,7 +2176,7 @@ handle_erlang(send, [Pid, M, _Opts], _Aux) when is_pid(Pid) ->
     handle_erlang(send, [Pid, M], _Aux),
     ok;
 handle_erlang(send, [Name, Msg | Opts], {_Old, _New, Ann}) when is_atom(Name) ->
-    {ok, Ret} = call_ctl(get_ctl(), {whereis, [], get_node(), Name}),
+    {ok, Ret} = call_ctl(get_ctl(), ?cci_whereis([], get_node(), Name)),
     case Ret of
         {_, Pid} when is_pid(Pid) ->
             %% assume lookup and send is atomic (actually not in Beam VM)
@@ -2191,7 +2191,7 @@ handle_erlang(send, [Name, Msg | Opts], {_Old, _New, Ann}) when is_atom(Name) ->
             error(badarg)
     end;
 handle_erlang(send, [{Name, Node}, Msg | Opts], {_Old, _New, Ann}) when is_atom(Node), is_atom(Name) ->
-    {ok, Ret} = call_ctl(get_ctl(), {whereis, get_node(), Node, Name}),
+    {ok, Ret} = call_ctl(get_ctl(), ?cci_whereis(get_node(), Node, Name)),
     case Ret of
         {_, Pid} when is_pid(Pid) ->
             %% assume lookup and send is atomic (actually not in Beam VM)
@@ -2270,19 +2270,19 @@ handle_erlang(convert_time_unit, [N, From, To], _Ann) ->
     erlang:convert_time_unit(N, NewFrom, NewTo);
 %% register/unregister/whereis
 handle_erlang(register, [Name, Pid], _Aux) when is_atom(Name), is_pid(Pid) ->
-    {ok, Ret} = call_ctl(get_ctl(), {register_process, get_node(), Name, Pid}),
+    {ok, Ret} = call_ctl(get_ctl(), ?cci_register_process(get_node(), Name, Pid)),
     case Ret of
         badarg -> error(badarg);
         _ -> Ret
     end;
 handle_erlang(unregister, [Name], _Aux) when is_atom(Name) ->
-    {ok, Ret} = call_ctl(get_ctl(), {unregister, get_node(), Name}),
+    {ok, Ret} = call_ctl(get_ctl(), ?cci_unregister(get_node(), Name)),
     case Ret of
         badarg -> error(badarg);
         _ -> Ret
     end;
 handle_erlang(whereis, [Name], _Aux) when is_atom(Name) ->
-    {ok, Ret} = call_ctl(get_ctl(), {whereis, [], get_node(), Name}),
+    {ok, Ret} = call_ctl(get_ctl(), ?cci_whereis([], get_node(), Name)),
     case Ret of
         {_, Pid} ->
             Pid;
@@ -2291,16 +2291,16 @@ handle_erlang(whereis, [Name], _Aux) when is_atom(Name) ->
     end;
 %% monitor
 handle_erlang(monitor, [process, Pid], _Aux) when is_pid(Pid) ->
-    {ok, Ref} = call_ctl(get_ctl(), {process_monitor, self(), [], Pid}),
+    {ok, Ref} = call_ctl(get_ctl(), ?cci_process_monitor(self(), [], Pid)),
     case Ref of
         badarg -> error(badarg);
         _ -> Ref
     end;
 handle_erlang(monitor, [process, Name], _Aux) when is_atom(Name) ->
-    {ok, Ref} = call_ctl(get_ctl(), {process_monitor, self(), [], {Name, get_node()}}),
+    {ok, Ref} = call_ctl(get_ctl(), ?cci_process_monitor(self(), [], {Name, get_node()})),
     Ref;
 handle_erlang(monitor, [process, {Name, Node}], _Aux) when is_atom(Name), is_atom(Node) ->
-    {ok, Ref} = call_ctl(get_ctl(), {process_monitor, self(), get_node(), {Name, Node}}),
+    {ok, Ref} = call_ctl(get_ctl(), ?cci_process_monitor(self(), get_node(), {Name, Node})),
     case Ref of
         badarg -> error(badarg);
         _ -> Ref
@@ -2312,10 +2312,10 @@ handle_erlang(monitor, [_OtherType, _Object], _Aux) ->
     make_ref();
 %% demonitor
 handle_erlang(demonitor, [Ref], _Aux) ->
-    {ok, Ret} = call_ctl(get_ctl(), {process_demonitor, self(), Ref, []}),
+    {ok, Ret} = call_ctl(get_ctl(), ?cci_process_demonitor(self(), Ref, [])),
     Ret;
 handle_erlang(demonitor, [Ref, Opts], _Aux) ->
-    {ok, Ret} = call_ctl(get_ctl(), {process_demonitor, self(), Ref, Opts}),
+    {ok, Ret} = call_ctl(get_ctl(), ?cci_process_demonitor(self(), Ref, Opts)),
     Ret;
 %% spawn
 handle_erlang(spawn, Args, _Aux) ->
@@ -2605,10 +2605,10 @@ post_spawn(S, Ctl, ShTab, Node, Pid) ->
             spawn ->
                 Pid;
             spawn_link ->
-                call_ctl(Ctl, {nodelay, {process_link, self(), Pid}}),
+                call_ctl(Ctl, {nodelay, ?cci_process_link(self(), Pid)}),
                 Pid;
             spawn_monitor ->
-                {ok, Ref} = call_ctl(Ctl, {nodelay, {process_monitor, self(), [], Pid}}),
+                {ok, Ref} = call_ctl(Ctl, {nodelay, ?cci_process_monitor(self(), [], Pid)}),
                 {Pid, Ref};
             _ ->
                 ?WARNING("Unhandled spawn type: ~p", S),
@@ -2651,13 +2651,13 @@ post_spawn_opt(Ctl, ShTab, Node, Pid, Opts) ->
     instrumented_process_created(Ctl, ShTab, Node, Pid),
     case lists:member(link, Opts) of
         true ->
-            call_ctl(Ctl, {nodelay, {process_link, self(), Pid}});
+            call_ctl(Ctl, {nodelay, ?cci_process_link(self(), Pid)});
         false -> ok
     end,
     Ret =
         case lists:member(monitor, Opts) of
             true ->
-                {ok, Ref} = call_ctl(Ctl, {nodelay, {process_monitor, self(), [], Pid}}),
+                {ok, Ref} = call_ctl(Ctl, {nodelay, ?cci_process_monitor(self(), [], Pid)}),
                 {Pid, Ref};
             _ ->
                 Pid

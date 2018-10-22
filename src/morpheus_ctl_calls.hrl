@@ -63,3 +63,15 @@
 -define(cci_instrumented_process_list(Node), {instrumented_process_list, Node}).
 
 -define(cci_instrumented_registered_list(Node), {instrumented_registered_list, Node}).
+
+-define(cci_process_monitor(Watcher, WatcherNode, Target), {process_monitor, Watcher, WatcherNode, Target}).
+
+-define(cci_process_demonitor(Watcher, Ref, Opts), {process_demonitor, Watcher, Ref, Opts}).
+
+-define(cci_register_external_process(Node, Name, Proc), {register_external_process, Node, Name, Proc}).
+
+-define(cci_register_process(Node, Name, Proc), {register_process, Node, Name, Proc}).
+
+-define(cci_unregister(Node, Name), {unregister, Node, Name}).
+
+-define(cci_whereis(FromNode, Node, Name), {whereis, FromNode, Node, Name}).
