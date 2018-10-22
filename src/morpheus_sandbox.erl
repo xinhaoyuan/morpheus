@@ -7,7 +7,7 @@
 %% For client api
 -export([ get_ctl/0
         , get_node/0
-        , call_ctl/2
+        , call_ctl/3
         , cast_ctl/2
         , start_node/4
         , set_flag/2
@@ -20,8 +20,8 @@
         ]).
 
 -export([ handle/5
-        , handle_erlang_spawn/2, handle_erlang_spawn/3, handle_erlang_spawn/4, handle_erlang_spawn/5
-        , handle_erlang_spawn_opt/2, handle_erlang_spawn_opt/4
+        , handle_erlang_spawn/3, handle_erlang_spawn/4, handle_erlang_spawn/5, handle_erlang_spawn/6
+        , handle_erlang_spawn_opt/3, handle_erlang_spawn_opt/5
         , hibernate_entry/3
         ]).
 
@@ -138,25 +138,25 @@ sht_abs_id(SHT, Proc) ->
     end.
 
 ctl_trace_send(#sandbox_opt{aux_module = Aux} = Opt, SHT,
-               From, Where, To, Type, Content, Effect) ->
+               Where, From, To, Type, Content, Effect) ->
     case Aux =:= undefined
         orelse not erlang:function_exported(Aux, trace_send_filter, 4)
         orelse Aux:trace_send_filter(From, To, Type, Content) of
         true ->
-            ctl_trace_send_real(Opt, SHT, From, Where, To, Type, Content, Effect);
+            ctl_trace_send_real(Opt, SHT, Where, From, To, Type, Content, Effect);
         _ ->
             ok
     end.
 
 ctl_trace_send_real(_Opt, _SHT,
-                    From, Where, To, message, Msg, Effect) ->
+                    Where, From, To, message, Msg, Effect) ->
     ?INFO("~w@~p -m-> ~w (~w):~n  ~p", [From, Where, To, Effect, Msg]);
 ctl_trace_send_real(_Opt, _SHT,
-                    From, Where, To, signal, Reason, _Effect) ->
+                    Where, From, To, signal, Reason, _Effect) ->
     ?INFO("~w@~p -!-> ~w signal:~n  ~p", [From, Where, To, Reason]).
 
 ctl_trace_receive(#sandbox_opt{aux_module = Aux} = Opt, SHT,
-                  To, Where, Type, Content) ->
+                  Where, To, Type, Content) ->
     case Aux =:= undefined
         orelse not erlang:function_exported(Aux, trace_receive_filter, 3)
         orelse Aux:trace_receive_filter(To, Type, Content) of
@@ -167,10 +167,10 @@ ctl_trace_receive(#sandbox_opt{aux_module = Aux} = Opt, SHT,
     end.
 
 ctl_trace_receive_real(_Opt, _SHT,
-                       Proc, Where, message, Msg) ->
+                       Where, Proc, message, Msg) ->
     ?INFO("~w@~p <-m-:~n  ~p", [Proc, Where, Msg]);
 ctl_trace_receive_real(_Opt, _SHT,
-                       Proc, Where, Type, undefined) ->
+                       Where, Proc, Type, undefined) ->
     ?INFO("~w@~p <-!-:~n  ~p", [Proc, Where, Type]).
 
 %% Currently, proc_table contains the following kinds of entries:
@@ -293,11 +293,11 @@ start(M, F, A, Opts) ->
                 Ctl
         end,
     Node = proplists:get_value(node, Opts, node()),
-    {ok, ok} = ?cc_node_created(Ctl, Node),
-    {ok, Opt} = ?cc_get_opt(Ctl),
-    {ok, ShTab} = ?cc_get_shtab(Ctl),
-    {ok, {NewM, Nifs}} = ?cc_instrument_module(Ctl, M),
-    {ok, {NewGI, []}} = ?cc_instrument_module(Ctl, morpheus_guest_internal),
+    {ok, ok} = ?cc_node_created(Ctl, global_start, Node),
+    {ok, Opt} = ?cc_get_opt(Ctl, global_start),
+    {ok, ShTab} = ?cc_get_shtab(Ctl, global_start),
+    {ok, {NewM, Nifs}} = ?cc_instrument_module(Ctl, global_start, M),
+    {ok, {NewGI, []}} = ?cc_instrument_module(Ctl, global_start, morpheus_guest_internal),
     RealM =
         case lists:member({F, length(A)}, Nifs) of
             true ->
@@ -309,17 +309,17 @@ start(M, F, A, Opts) ->
                         %% virtual init process!
                         erlang:group_leader(self(), self()),
                         instrumented_process_start(Ctl, Node, Opt, ShTab),
-                        ?cc_initial_kick(Ctl),
+                        ?cc_initial_kick(Ctl, global_start),
                         NewGI:init(),
                         instrumented_process_end(?CATCH(apply(RealM, F, A)))
                 end),
-    instrumented_process_created(Ctl, ShTab, Node, Pid),
+    instrumented_process_created(Ctl, global_start, ShTab, Node, Pid),
     instrumented_process_kick(Ctl, Node, Pid),
     Ret.
 
-call_ctl(Ctl, Args) ->
+call_ctl(Ctl, Where, Args) ->
     MRef = erlang:monitor(process, Ctl),
-    Ctl ! {call, self(), MRef, Args},
+    Ctl ! {call, Where, self(), MRef, Args},
     receive
         {MRef, Ret} ->
             erlang:demonitor(MRef, [flush]),
@@ -353,7 +353,7 @@ ctl_loop(S0) ->
             false -> false
         end,
     case M of
-        {call, Pid, Ref, Req} ->
+        {call, Where, Pid, Ref, Req} ->
             case not Initial
                 andalso ctl_call_can_buffer(Req)
                 andalso dict:find(Pid, AIDT) of
@@ -365,30 +365,30 @@ ctl_loop(S0) ->
                                 true -> ?INFO("delay undet_barrier ~p", [Req]);
                                 false -> ok
                             end,
-                            ctl_loop(ctl_push_request_to_buffer(S, Aid, Pid, Ref, {undet_barrier, true}));
+                            ctl_loop(ctl_push_request_to_buffer(S, Where, Aid, Pid, Ref, {undet_barrier, true}));
                         {undet_barrier} ->
-                            ctl_loop(ctl_loop_call(S, ToTrace, Pid, Ref, {undet_barrier, false}));
+                            ctl_loop(ctl_loop_call(S, Where, ToTrace, Pid, Ref, {undet_barrier, false}));
                         {undet, _} ->
                             case ToTrace of
                                 true -> ?INFO("delay undet resp ~p", [Req]);
                                 false -> ok
                             end,
                             Pid ! {Ref, ok},
-                            ctl_loop(ctl_push_request_to_buffer(S, Aid, undet, Ref, Req));
+                            ctl_loop(ctl_push_request_to_buffer(S, Where, Aid, undet, Ref, Req));
                         _ ->
                             case ToTrace of
                                 true -> ?INFO("delay resp ~p", [Req]);
                                 false -> ok
                             end,
-                            ctl_loop(ctl_push_request_to_buffer(S, Aid, Pid, Ref, Req))
+                            ctl_loop(ctl_push_request_to_buffer(S, Where, Aid, Pid, Ref, Req))
                     end;
                 error ->
-                    ctl_loop(ctl_loop_call(S, ToTrace, Pid, Ref, Req));
+                    ctl_loop(ctl_loop_call(S, Where, ToTrace, Pid, Ref, Req));
                 false ->
-                    ctl_loop(ctl_loop_call(S, ToTrace, Pid, Ref, Req))
+                    ctl_loop(ctl_loop_call(S, Where, ToTrace, Pid, Ref, Req))
             end;
         #fd_delay_resp{ref = Ref} ->
-            {SAfterPop, ReplyTo, Ref, Req} = ctl_pop_request_from_buffer(S, Ref),
+            {SAfterPop, Where, ReplyTo, Ref, Req} = ctl_pop_request_from_buffer(S, Ref),
             case ToTrace of
                 true -> ?INFO("resume resp ~p", [Req]);
                 false -> ok
@@ -397,7 +397,7 @@ ctl_loop(S0) ->
                 timeout ->
                     ctl_loop(ctl_handle_cast(SAfterPop, Req));
                 _ ->
-                    ctl_loop(ctl_loop_call(SAfterPop, ToTrace, ReplyTo, Ref, Req))
+                    ctl_loop(ctl_loop_call(SAfterPop, Where, ToTrace, ReplyTo, Ref, Req))
             end;
         {cast, {stop, Reason}} ->
             ctl_exit(S, Reason);
@@ -439,8 +439,8 @@ ctl_push_request_to_buffer(
                 , buffer = Buffer
                 , waiting_counter = WC
                 , waiting = Waiting} = S,
-  AID, ReplyTo, Ref, Req) ->
-    NewWaiting = dict:store(Ref, {ReplyTo, Req}, Waiting),
+  Where, AID, ReplyTo, Ref, Req) ->
+    NewWaiting = dict:store(Ref, {Where, ReplyTo, Req}, Waiting),
     NewBuffer = [{case ReplyTo of
                       undet -> -AID - 1;
                       _ -> AID
@@ -484,23 +484,23 @@ ctl_pop_request_from_buffer(#sandbox_state{waiting_counter = WC, waiting = Waiti
     case dict:take(Ref, Waiting) of
         error ->
             error(pop_request_failed);
-        {{ReplyTo, Req}, NewWaiting} ->
+        {{Where, ReplyTo, Req}, NewWaiting} ->
             case ReplyTo of
                 undet ->
                     %% undet async request
                     {S#sandbox_state{waiting_counter = WC - 1,
                                      waiting = NewWaiting},
-                     ReplyTo, Ref, Req};
+                     Where, ReplyTo, Ref, Req};
                 timeout ->
                     {S#sandbox_state{waiting_counter = WC - 1,
                                      waiting = NewWaiting},
-                     ReplyTo, Ref, Req};
+                     Where, ReplyTo, Ref, Req};
                 _ ->
                     {S#sandbox_state{alive = [ReplyTo | S#sandbox_state.alive],
                                      alive_counter = S#sandbox_state.alive_counter + 1,
                                      waiting_counter = WC - 1,
                                      waiting = NewWaiting},
-                     ReplyTo, Ref, Req}
+                     Where, ReplyTo, Ref, Req}
             end
     end.
 
@@ -652,14 +652,14 @@ ctl_call_target(_) -> morpheus.
 
 ctl_call_target_type(_) -> morpheus_call.
 
-ctl_loop_call(S, ToTrace,
+ctl_loop_call(S, Where, ToTrace,
               ReplyTo, Ref, Req) ->
     case ToTrace of
         true ->
             ?INFO("ctl req ~p", [Req]);
         false -> ok
     end,
-    {NewS, Ret} = ctl_handle_call(S, Req),
+    {NewS, Ret} = ctl_handle_call(S, Where, Req),
     case ToTrace of
         true ->
             ?INFO("ctl resp ~p", [Ret]);
@@ -673,21 +673,22 @@ ctl_loop_call(S, ToTrace,
     end,
     NewS.
 
-ctl_handle_call(S, {nodelay, Req}) ->
-    ctl_handle_call(S, Req);
-ctl_handle_call(S, {delay}) ->
+ctl_handle_call(S, Where, {nodelay, Req}) ->
+    ctl_handle_call(S, Where, Req);
+ctl_handle_call(S, _Where, {delay}) ->
     {S, ok};
-ctl_handle_call(S, {delay, Req}) ->
-    ctl_handle_call(S, Req);
-ctl_handle_call(S, {maybe_delay, Req}) ->
-    ctl_handle_call(S, Req);
-ctl_handle_call(S, {log, _}) ->
+ctl_handle_call(S, Where, {delay, Req}) ->
+    ctl_handle_call(S, Where, Req);
+ctl_handle_call(S, Where, {maybe_delay, Req}) ->
+    ctl_handle_call(S, Where, Req);
+ctl_handle_call(S, _Where, {log, _}) ->
     {S, ok};
-ctl_handle_call(S, ?cci_initial_kick()) ->
+ctl_handle_call(S, _Where, ?cci_initial_kick()) ->
     {S#sandbox_state{initial = false}, ok};
-ctl_handle_call(S, {ets_op}) ->
+ctl_handle_call(S, _Where, {ets_op}) ->
     {S, ok};
-ctl_handle_call(#sandbox_state{proc_table = PT} = S, ?cci_ets_all()) ->
+ctl_handle_call(#sandbox_state{proc_table = PT} = S,
+                _Where, ?cci_ets_all()) ->
     Ret = lists:foldr(
             fun (Tab, Acc) ->
                     Owner = ets:info(Tab, owner),
@@ -699,21 +700,27 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S, ?cci_ets_all()) ->
                     end
             end, [], ets:all()),
     {S, Ret};
-ctl_handle_call(#sandbox_state{undet_signals = UndetSigs} = S, {undet}) ->
+ctl_handle_call(#sandbox_state{undet_signals = UndetSigs} = S,
+                _Where, {undet}) ->
     {S#sandbox_state{undet_signals = UndetSigs + 1}, ok};
-ctl_handle_call(#sandbox_state{undet_signals = UndetSigs} = S, {undet, R}) ->
-    ctl_handle_call(S#sandbox_state{undet_signals = UndetSigs + 1}, R);
-ctl_handle_call(S, {undet_barrier, Result}) ->
+ctl_handle_call(#sandbox_state{undet_signals = UndetSigs} = S,
+                Where, {undet, R}) ->
+    ctl_handle_call(S#sandbox_state{undet_signals = UndetSigs + 1}, Where, R);
+ctl_handle_call(S, _Where, {undet_barrier, Result}) ->
     %% The result is written in push_req
     {S, Result};
 % internal use only
-ctl_handle_call(#sandbox_state{transient_counter = TC} = S, {become_persistent, _Proc}) ->
+ctl_handle_call(#sandbox_state{transient_counter = TC} = S,
+                _Where, {become_persistent, _Proc}) ->
     {S#sandbox_state{transient_counter = TC - 1}, ok};
-ctl_handle_call(#sandbox_state{opt = Opt} = S, ?cci_get_opt()) ->
+ctl_handle_call(#sandbox_state{opt = Opt} = S,
+                _Where, ?cci_get_opt()) ->
     {S, Opt};
-ctl_handle_call(#sandbox_state{proc_shtable = ShTab} = S, ?cci_get_shtab()) ->
+ctl_handle_call(#sandbox_state{proc_shtable = ShTab} = S,
+                _Where, ?cci_get_shtab()) ->
     {S, ShTab};
-ctl_handle_call(#sandbox_state{opt = Opt} = S, ?cci_get_clock()) ->
+ctl_handle_call(#sandbox_state{opt = Opt} = S,
+                _Where, ?cci_get_clock()) ->
     case Opt#sandbox_opt.control_timeouts of
         true ->
             #sandbox_state{vclock = VC, vclock_offset = VCO} = S,
@@ -721,9 +728,11 @@ ctl_handle_call(#sandbox_state{opt = Opt} = S, ?cci_get_clock()) ->
         false ->
             {S, {erlang:monotonic_time(millisecond), erlang:time_offset(millisecond)}}
     end;
-ctl_handle_call(#sandbox_state{unique_integer = UI} = S, ?cci_unique_integer()) ->
+ctl_handle_call(#sandbox_state{unique_integer = UI} = S,
+                _Where, ?cci_unique_integer()) ->
     {S#sandbox_state{unique_integer = UI + 1}, UI};
-ctl_handle_call(#sandbox_state{mod_table = MT} = S, ?cci_instrument_module(M)) ->
+ctl_handle_call(#sandbox_state{mod_table = MT} = S,
+                _Where, ?cci_instrument_module(M)) ->
     case ?TABLE_GET(MT, M) of
         {M, {NewM, Nifs}} ->
             {S, {NewM, Nifs}};
@@ -774,7 +783,7 @@ ctl_handle_call(#sandbox_state{mod_table = MT} = S, ?cci_instrument_module(M)) -
             end
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                {node_created, Node}) ->
+                _Where, {node_created, Node}) ->
     case ?TABLE_GET(PT, {node, Node}) of
         {_, _} ->
             ?ERROR("node_created happened twice", []),
@@ -785,7 +794,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             {S#sandbox_state{proc_table = PT1}, ok}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                {node_set_alive, Node, Alive}) ->
+                _Where, {node_set_alive, Node, Alive}) ->
     SetTo = case Alive of true -> online; false -> offline end,
     case ?TABLE_GET(PT, {node, Node}) of
         {_, {SetTo, _}} ->
@@ -838,7 +847,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             {S, false}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                ?cci_list_nodes(FromNode, Label)) ->
+                _Where, ?cci_list_nodes(FromNode, Label)) ->
     {_, {Status, _}} = ?TABLE_GET(PT, {node, FromNode}),
     case Label of
         this ->
@@ -869,7 +878,7 @@ ctl_handle_call(#sandbox_state
                 , abs_id_counter = AIDC
                 , transient_counter = TC
                 , alive_counter = AC} = S,
-                ?cci_instrumented_process_created(Node, Proc)) ->
+                _Where, ?cci_instrumented_process_created(Node, Proc)) ->
     case {?TABLE_GET(PT, {proc, Proc}), ?TABLE_GET(PT, {node, Node})} of
         {{_, _}, _} ->
             ?ERROR("instrumented_process_created happened twice", []),
@@ -910,13 +919,13 @@ ctl_handle_call(#sandbox_state
             {S, badarg}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                ?cci_instrumented_process_list(Node)) ->
+                _Where, ?cci_instrumented_process_list(Node)) ->
     {S, case ?TABLE_GET(PT, {node_procs, Node}) of
             {_, L} -> L;
             undefined -> []
         end};
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                ?cci_instrumented_registered_list(Node)) ->
+                _Where, ?cci_instrumented_registered_list(Node)) ->
     %% XXX make it faster?
     NameList = ?TABLE_FOLD(
                   PT,
@@ -931,7 +940,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
                   end, []),
     {S, NameList};
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                ?cci_process_link(PA, PB)) ->
+                _Where, ?cci_process_link(PA, PB)) ->
     case {?TABLE_GET(PT, {linking, PA}), ?TABLE_GET(PT, {linking, PB})} of
         {{_, LA}, {_, LB}} ->
             case PA =/= PB andalso ?TABLE_GET(PT, {link, PA, PB}) of
@@ -977,7 +986,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             end
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                ?cci_process_unlink(PA, PB)) ->
+                _Where, ?cci_process_unlink(PA, PB)) ->
     case PA =/= PB andalso ?TABLE_GET(PT, {link, PA, PB}) of
         false ->
             {S, true};
@@ -1005,7 +1014,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
     end;
 %%% For name based monitoring, I'm not sure how to handle node name regarding to offline/online switch.
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                ?cci_process_monitor(Watcher, FromNode, {TName, TNode})) ->
+                _Where, ?cci_process_monitor(Watcher, FromNode, {TName, TNode})) ->
     case FromNode of
         [] ->
             ctl_monitor_proc(S, Watcher, {TName, TNode}, {TName, TNode});
@@ -1019,10 +1028,10 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
                     {S, badarg}
             end
     end;
-ctl_handle_call(S, ?cci_process_monitor(Watcher, [], Target)) ->
+ctl_handle_call(S, _Where, ?cci_process_monitor(Watcher, [], Target)) ->
     ctl_monitor_proc(S, Watcher, Target, Target);
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                ?cci_process_demonitor(Proc, Ref, Opts)) ->
+                _Where, ?cci_process_demonitor(Proc, Ref, Opts)) ->
     case ?TABLE_GET(PT, {monitor, Ref}) of
         {_, {Watcher, Target, _Object}} ->
             {{_, MList}, {_, WList}} =
@@ -1058,7 +1067,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             end
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                ?cci_process_set_trap_exit(Proc, On)) ->
+                _Where, ?cci_process_set_trap_exit(Proc, On)) ->
     case ?TABLE_GET(PT, {proc, Proc}) of
         {_, {alive, Props}} ->
             Prev =
@@ -1077,7 +1086,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             {S, noproc}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                ?cci_register_process(Node, Name, Proc)) ->
+                _Where, ?cci_register_process(Node, Name, Proc)) ->
     case ?TABLE_GET(PT, {name, Proc}) of
         {_, {Node, []}} ->
             case ?TABLE_GET(PT, {reg, Node, Name}) of
@@ -1099,7 +1108,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             {S, badarg}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                ?cci_register_external_process(Node, Name, Proc)) ->
+                _Where, ?cci_register_external_process(Node, Name, Proc)) ->
     case ?TABLE_GET(PT, {reg, Node, Name}) of
         {_, _} ->
             {S, badarg};
@@ -1109,7 +1118,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             {S#sandbox_state{proc_table = PT1}, true}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                ?cci_unregister(Node, Name)) ->
+                _Where, ?cci_unregister(Node, Name)) ->
     case ?TABLE_GET(PT, {reg, Node, Name}) of
         {_, {proc, Proc}} ->
             PT0 = case ?TABLE_GET(PT, {name, Proc}) of
@@ -1125,7 +1134,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             {S, badarg}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                ?cci_whereis(FromNode, Node, Name)) ->
+                _Where, ?cci_whereis(FromNode, Node, Name)) ->
     Node0 =
         case FromNode of
             [] -> Node;
@@ -1149,7 +1158,7 @@ ctl_handle_call(#sandbox_state{ opt = _Opt
                               , proc_table = PT
                               , proc_shtable = SHT
                               , alive_counter = AC} = S,
-                ?cci_process_receive(Proc, PatFun, Timeout)) ->
+                _Where, ?cci_process_receive(Proc, PatFun, Timeout)) ->
     Ref = make_ref(),
     case ?SHTABLE_GET(SHT, {exit, Proc}) of
         undefined ->
@@ -1219,9 +1228,10 @@ ctl_handle_call(#sandbox_state{ opt = _Opt
             Proc ! {Ref, signal},
             {S, Ref}
     end;
-ctl_handle_call(S, ?cci_send_msg(From, Where, To, M)) ->
-    ctl_process_send(S, From, Where, To, M);
-ctl_handle_call(#sandbox_state{proc_table = PT} = S, ?cci_process_info(Proc, Props)) ->
+ctl_handle_call(S, Where, ?cci_send_msg(From, To, M)) ->
+    ctl_process_send(S, Where, From, To, M);
+ctl_handle_call(#sandbox_state{proc_table = PT} = S,
+                _Where, ?cci_process_info(Proc, Props)) ->
     Ret =
         case ?TABLE_GET(PT, {proc, Proc}) of
             {_, {alive, _}} ->
@@ -1288,7 +1298,8 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S, ?cci_process_info(Proc, Pro
             _ -> undefined
         end,
     {S, Ret};
-ctl_handle_call(#sandbox_state{proc_table = PT} = S, ?cci_is_process_alive(Proc)) ->
+ctl_handle_call(#sandbox_state{proc_table = PT} = S,
+                _Where, ?cci_is_process_alive(Proc)) ->
     case ?TABLE_GET(PT, {proc, Proc}) of
         undefined ->
             {S, erlang:is_process_alive(Proc)};
@@ -1298,15 +1309,15 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S, ?cci_is_process_alive(Proc)
             {S, false}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                ?cci_send_signal(From, Where, Proc, Reason)) ->
+                Where, ?cci_send_signal(From, Proc, Reason)) ->
     case ?TABLE_GET(PT, {proc, Proc}) of
         {_, {alive, Props}} ->
             case Reason =/= kill andalso dict:find(trap_exit, Props) of
                 {ok, true} ->
-                    {NextS, ok} = ctl_process_send(S, From, Where, Proc, {'EXIT', From, Reason}),
+                    {NextS, ok} = ctl_process_send(S, Where, From, Proc, {'EXIT', From, Reason}),
                     {NextS, true};
                 _ when Reason =/= normal ->
-                    {NextS, ok} = ctl_process_send_signal(S, From, Where, Proc, Reason),
+                    {NextS, ok} = ctl_process_send_signal(S, Where, From, Proc, Reason),
                     {NextS, true};
                 _ ->
                     {S, true}
@@ -1315,7 +1326,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             {S, true}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
-                ?cci_process_on_exit(Proc, Reason)) ->
+                _Where, ?cci_process_on_exit(Proc, Reason)) ->
     case ?TABLE_GET(PT, {proc, Proc}) of
         {_, {alive, _Props}} ->
             unlink(Proc),
@@ -1374,7 +1385,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
                                                  end;
                                              _ -> Object
                                          end,
-                                     {NextS, ok} = ctl_process_send(CurS, Proc, exiting, Watcher,
+                                     {NextS, ok} = ctl_process_send(CurS, exiting, Proc, Watcher,
                                                                     {'DOWN', Ref, process, RealObject,
                                                                      case Reason of
                                                                          kill -> killed;
@@ -1387,7 +1398,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
                                      {_, {alive, LProps}} = ?TABLE_GET(PT, {proc, Linked}),
                                      case dict:find(trap_exit, LProps) of
                                          {ok, true} ->
-                                             {NextS, ok} = ctl_process_send(CurS, Proc, exiting, Linked,
+                                             {NextS, ok} = ctl_process_send(CurS, exiting, Proc, Linked,
                                                                             {'EXIT', Proc,
                                                                              case Reason of
                                                                                  kill -> killed;
@@ -1395,7 +1406,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
                                                                              end}),
                                              NextS;
                                          _ when Reason =/= normal ->
-                                             {NextS, ok} = ctl_process_send_signal(CurS, Proc, exiting, Linked, Reason),
+                                             {NextS, ok} = ctl_process_send_signal(CurS, exiting, Proc, Linked, Reason),
                                              NextS;
                                          _ ->
                                              CurS
@@ -1412,7 +1423,8 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             ?WARNING("process_on_exit for unknown proc", []),
             {S, noproc}
     end;
-ctl_handle_call(#sandbox_state{res_table = ResTable} = S, ?cci_resource_acquire(OpList)) ->
+ctl_handle_call(#sandbox_state{res_table = ResTable} = S,
+                _Where, ?cci_resource_acquire(OpList)) ->
     {NewResTable, InfoAcc} =
         lists:foldr(
           fun ({ResType, Start, Size, OpType} = OpInfo, {CurResTable, InfoAcc}) ->
@@ -1445,7 +1457,8 @@ ctl_handle_call(#sandbox_state{res_table = ResTable} = S, ?cci_resource_acquire(
                   end
           end, {ResTable, []}, OpList),
     {S#sandbox_state{res_table = NewResTable}, InfoAcc};
-ctl_handle_call(#sandbox_state{res_table = ResTable} = S, ?cci_resource_release(OpList)) ->
+ctl_handle_call(#sandbox_state{res_table = ResTable} = S,
+                _Where, ?cci_resource_release(OpList)) ->
     NewResTable =
         lists:foldr(
           fun ({ResType, _, _, _} = OpInfo, CurResTable) ->
@@ -1470,7 +1483,7 @@ ctl_process_ets_on_exit(#sandbox_state{proc_shtable = ShTab} = S, Proc) ->
               ([Ets, VEts, _, {Heir, HeirData}], {CurS, L}) when Heir =/= Proc ->
                   HeirMsg = {'ETS-TRANSFER', VEts, Proc, HeirData},
                   ets:give_away(Ets, Heir, morpheus_internal),
-                  {CurS0, ok} = ctl_process_send(CurS, Proc, exiting, Heir, HeirMsg),
+                  {CurS0, ok} = ctl_process_send(CurS, exiting, Proc, Heir, HeirMsg),
                   {CurS0, [Ets | L]};
               (_, {CurS, L}) -> {CurS, L}
           end,
@@ -1482,7 +1495,6 @@ ctl_process_ets_on_exit(#sandbox_state{proc_shtable = ShTab} = S, Proc) ->
                   end, HandledList),
     S1.
 
-
 ctl_monitor_proc(#sandbox_state{proc_table = PT} = S,
                  Watcher, {Name, Node}, Object) ->
     case ?TABLE_GET(PT, {reg, Node, Name}) of
@@ -1492,7 +1504,7 @@ ctl_monitor_proc(#sandbox_state{proc_table = PT} = S,
             Ref = make_ref(),
             %% Offline/online won't change since the Object passed in,
             %% so no translation here
-            {S0, ok} = ctl_process_send(S, system, undefined, Watcher, {'DOWN', Ref, process, Object, noproc}),
+            {S0, ok} = ctl_process_send(S, undefined, system, Watcher, {'DOWN', Ref, process, Object, noproc}),
             {S0, Ref}
     end;
 ctl_monitor_proc(#sandbox_state{proc_table = PT} = S,
@@ -1525,7 +1537,7 @@ ctl_monitor_proc(#sandbox_state{proc_table = PT} = S,
             case ToNotify of
                 true ->
                     Ref = make_ref(),
-                    {S0, ok} = ctl_process_send(S, system, undefined, Watcher, {'DOWN', Ref, process, Object, noproc}),
+                    {S0, ok} = ctl_process_send(S, undefined, system, Watcher, {'DOWN', Ref, process, Object, noproc}),
                     {S0, Ref};
                 false ->
                     Ref = make_ref(),
@@ -1603,7 +1615,7 @@ ctl_handle_cast( #sandbox_state{ opt = #sandbox_opt{ time_uncertainty = TUC }
                            case dict:find(Proc, AIDT) of
                                {ok, Aid} ->
                                    ctl_push_request_to_buffer(
-                                     CurS, Aid, timeout, make_ref(), {receive_timeout, Proc, Ref})
+                                     CurS, kick_timeout, Aid, timeout, make_ref(), {receive_timeout, Proc, Ref})
                            end
                    end, S0, ToFire),
             S1
@@ -1622,7 +1634,7 @@ ctl_process_send( #sandbox_state
                   , proc_table = PT
                   , proc_shtable = SHT
                   , alive_counter = AC} = S
-                , From, Where, Proc, Msg) ->
+                , Where, From, Proc, Msg) ->
     {S0, R, I} =
         case ?TABLE_GET(PT, {msg_queue, Proc}) of
             undefined ->
@@ -1675,7 +1687,7 @@ ctl_process_send( #sandbox_state
         true ->
             case ?SHTABLE_GET(SHT, tracing) of
                 {_, true} ->
-                    ctl_trace_send(Opt, SHT, From, Where, Proc, message, Msg, I);
+                    ctl_trace_send(Opt, SHT, Where, From, Proc, message, Msg, I);
                 _ ->
                     ok
             end;
@@ -1688,12 +1700,12 @@ ctl_process_send_signal( #sandbox_state
                          , proc_table = PT
                          , proc_shtable = SHT
                          , alive_counter = AC} = S
-                       , From, Where, Proc, Reason) ->
+                       , Where, From, Proc, Reason) ->
     case Verbose of
         true ->
             case ?SHTABLE_GET(SHT, tracing) of
                 {_, true} ->
-                    ctl_trace_send(Opt, SHT, From, Where, Proc, signal, Reason, sent);
+                    ctl_trace_send(Opt, SHT, Where, From, Proc, signal, Reason, sent);
                 _ -> ok
             end;
         false -> ok
@@ -1800,7 +1812,7 @@ to_expose(_, _, _, _) ->
 %% There is only one exception: `instrumented_process_created/2`, which can be called in `spawn_instrumented/5`
 
 handle(Old, New, Tag, Args, Ann) ->
-    handle_signals(),
+    handle_signals(Ann),
     #sandbox_opt{verbose_handle = Verbose, aux_module = Aux} =
         Opt = get_opt(),
     case Verbose of
@@ -1821,13 +1833,13 @@ handle(Old, New, Tag, Args, Ann) ->
             apply(fun (M, F, A) ->
                           case Aux:to_delay_call(Old, M, F, A) of
                               true ->
-                                  call_ctl(get_ctl(), {delay});
+                                  call_ctl(get_ctl(), Ann, {delay});
                               {true, Log} ->
-                                  call_ctl(get_ctl(), {delay, {log, Log}});
+                                  call_ctl(get_ctl(), Ann, {delay, {log, Log}});
                               false ->
                                   ok;
                               {false, Log} ->
-                                  call_ctl(get_ctl(), {nodelay, {log, Log}})
+                                  call_ctl(get_ctl(), Ann, {nodelay, {log, Log}})
                           end
                   end, Args);
         _ -> undefined
@@ -1865,7 +1877,7 @@ handle(Old, New, Tag, Args, Ann) ->
         {undet_nif_stub, [F, A]} ->
             %% ?INFO("undet nif ~p:~p/~p", [Old, F, length(A)]),
             R = apply(Old, F, A),
-            ?cc_undet(get_ctl()),
+            ?cc_undet(get_ctl(), Ann),
             R;
         {apply, [F, A]} ->
             case is_function(F) andalso erlang:fun_info(F, type) of
@@ -1898,7 +1910,7 @@ handle(Old, New, Tag, Args, Ann) ->
             %% HACK to skip re-creating user process - forwarding io_request to the real user process.
             %% XXX message from user may lead to non-determinism
             RealUser = erlang:whereis(user),
-            {ok, true} = ?cc_register_external_process(get_ctl(), get_node(), user, RealUser),
+            {ok, true} = ?cc_register_external_process(get_ctl(), Ann, get_node(), user, RealUser),
             RealUser;
         {call, [logger_simple_h, changing_config, _A]} ->
             %% HACK - changing_config does not exist in logger_simple_h, but will be called in bootstrap process - just to workaround it.
@@ -1922,7 +1934,7 @@ handle(Old, New, Tag, Args, Ann) ->
         {call, [Old, F, A]} ->
             apply(New, F, A);
         {call, [M, F, A]} ->
-            {M0, F0, A0} = rewrite_call(M, F, A),
+            {M0, F0, A0} = rewrite_call(Ann, M, F, A),
             apply(M0, F0, A0);
         {'receive', [PatFun, Timeout]} ->
             if
@@ -1932,15 +1944,15 @@ handle(Old, New, Tag, Args, Ann) ->
                     error(timeout_value)
             end,
             Ctl = get_ctl(),
-            case call_ctl(Ctl, {undet_barrier}) of
+            case call_ctl(Ctl, Ann, {undet_barrier}) of
                 {ok, true} ->
-                    handle_undet_message(Ctl),
-                    handle_signals();
+                    handle_undet_message(Ctl, Ann),
+                    handle_signals(Ann);
                 {ok, false} ->
                     ok
             end,
-            {ok, Ref} = ?cc_process_receive(Ctl, self(), PatFun, Timeout),
-            R = handle_receive(Ctl, Ref),
+            {ok, Ref} = ?cc_process_receive(Ctl, Ann, self(), PatFun, Timeout),
+            R = handle_receive(Ctl, Ann, Ref),
             #sandbox_opt{trace_receive = TraceReceive} = Opt,
             ToTrace =
                 case TraceReceive of
@@ -1956,65 +1968,65 @@ handle(Old, New, Tag, Args, Ann) ->
                 end,
             case R of
                 signal ->
-                    handle_signals();
+                    handle_signals(Ann);
                 timeout ->
                     case ToTrace of
                         true ->
-                            ctl_trace_receive(Opt, get_shtab(), self(), Ann, timeout, undefined);
+                            ctl_trace_receive(Opt, get_shtab(), Ann, self(), timeout, undefined);
                         _ -> ok
                     end,
                     timeout;
                 [message | Msg] ->
                     case ToTrace of
                         true ->
-                            ctl_trace_receive(Opt, get_shtab(), self(), Ann, message, Msg);
+                            ctl_trace_receive(Opt, get_shtab(), Ann, self(), message, Msg);
                         _ -> ok
                     end,
                     R
             end
     end.
 
-rewrite_call(M, F, A) ->
+rewrite_call(Where, M, F, A) ->
     Arity = length(A),
     case morpheus_instrument:whitelist_func(M, F, Arity) of
         true ->
             {M, F, A};
         false ->
             Ctl = get_ctl(),
-            {ok, NewM, NewF} = get_instrumented_func(Ctl, M, F, Arity),
+            {ok, NewM, NewF} = get_instrumented_func(Ctl, Where, M, F, Arity),
             {NewM, NewF, A}
     end.
 
-handle_undet_message(Ctl) ->
+handle_undet_message(Ctl, Where) ->
     receive
         {'ETS-TRANSFER', _, _, morpheus_internal} ->
             %% ignore redundant internal give_away message
-            handle_undet_message(Ctl);
+            handle_undet_message(Ctl, Where);
         M ->
             ?INFO("~p got external message before blocking:~n  ~p", [self(), M]),
             %% At this moment, undet timeout is off, and this process is considered alive.
             %% we do not need to use {undet, ...} request to activate it again
-            ?cc_send_msg(Ctl, undet, undefined, self(), M),
-            handle_undet_message(Ctl)
+            ?cc_send_msg(Ctl, Where, undet, self(), M),
+            handle_undet_message(Ctl, Where)
     after
         0 ->
             ok
     end.
 
-handle_receive(Ctl, Ref) ->
+handle_receive(Ctl, Where, Ref) ->
     receive
         {Ref, Resp} ->
             Resp;
         {'ETS-TRANSFER', _, _, morpheus_internal} ->
             %% ignore redundant internal give_away message
-            handle_receive(Ctl, Ref);
+            handle_receive(Ctl, Where, Ref);
         M ->
             ?INFO("~p received external message while blocking:~n  ~p", [self(), M]),
-            ?cc_undet_send_msg(Ctl, undet, undefined, self(), M),
-            handle_receive(Ctl, Ref)
+            ?cc_undet_send_msg(Ctl, Where, undet, self(), M),
+            handle_receive(Ctl, Where, Ref)
     end.
 
-handle_signals() ->
+handle_signals(Where) ->
     ShTab = get_shtab(),
     case ?SHTABLE_GET(ShTab, {exit, self()}) of
         undefined ->
@@ -2025,7 +2037,7 @@ handle_signals() ->
                 true ->
                     case ?SHTABLE_GET(ShTab, tracing) of
                         {_, true} ->
-                            ctl_trace_receive(Opt, get_shtab(), self(), [], signal, undefined);
+                            ctl_trace_receive(Opt, get_shtab(), [], self(), signal, undefined);
                         _ -> ok
                     end;
                 _ -> ok
@@ -2034,11 +2046,11 @@ handle_signals() ->
             %% cannot throw exit since it may be caught by the guest ...
             ?DEBUG("~p get exit signal ~p", [self(), Reason]),
             ?SHTABLE_REMOVE(ShTab, {exit, self()}),
-            ?cc_process_on_exit(get_ctl(), self(), Reason),
+            ?cc_process_on_exit(get_ctl(), Where, self(), Reason),
             become_tomb()
     end.
 
-get_instrumented_module_info(Ctl, M) ->
+get_instrumented_module_info(Ctl, Where, M) ->
     Dict =
         case get(?PDK_MOD_MAP) of
             undefined ->
@@ -2048,7 +2060,7 @@ get_instrumented_module_info(Ctl, M) ->
     {ToUpdate, NewM, Nifs} =
         case dict:find(M, Dict) of
             error ->
-                {ok, {_NewM, _Nifs}} = ?cc_instrument_module(Ctl, M),
+                {ok, {_NewM, _Nifs}} = ?cc_instrument_module(Ctl, Where, M),
                 {true, _NewM, sets:from_list(_Nifs)};
             {ok, {_NewM, _Nifs}} ->
                 {false, _NewM, _Nifs}
@@ -2061,11 +2073,11 @@ get_instrumented_module_info(Ctl, M) ->
     end,
     {ok, NewM, Nifs}.
 
-get_instrumented_func(Ctl, M, F, _A) ->
-    {ok, NewM, _Nifs} = get_instrumented_module_info(Ctl, M),
+get_instrumented_func(Ctl, Where, M, F, _A) ->
+    {ok, NewM, _Nifs} = get_instrumented_module_info(Ctl, Where, M),
     {ok, NewM, F}.
 
-instrumented_process_created(Ctl, ShTab, Node, Proc) ->
+instrumented_process_created(Ctl, Where, ShTab, Node, Proc) ->
     NewAbsId =
         case get(?PDK_ABS_ID) of
             undefined ->
@@ -2077,7 +2089,7 @@ instrumented_process_created(Ctl, ShTab, Node, Proc) ->
                 {pid, Node, [C | PList]}
         end,
     ?SHTABLE_SET(ShTab, {abs_id, Proc}, NewAbsId),
-    {ok, ok} = ?cc_instrumented_process_created(Ctl, Node, Proc).
+    {ok, ok} = ?cc_instrumented_process_created(Ctl, Where, Node, Proc).
 
 instrumented_process_kick(_Ctl, _Node, Proc) ->
     Proc ! start.
@@ -2125,15 +2137,15 @@ instrumented_process_end(V) ->
     before_tomb(),
     case V of
         {ok, _Value} ->
-            ?cc_process_on_exit(get_ctl(), self(), normal);
+            ?cc_process_on_exit(get_ctl(), process_exit, self(), normal);
         {exit, R, _} ->
-            ?cc_process_on_exit(get_ctl(), self(), R);
+            ?cc_process_on_exit(get_ctl(), process_exit, self(), R);
         {error, R, ST} ->
             ?WARNING("Process ~p abort with ~p", [self(), V]),
-            ?cc_process_on_exit(get_ctl(), self(), {R, ST});
+            ?cc_process_on_exit(get_ctl(), process_exit, self(), {R, ST});
         {throw, R, ST} ->
             ?WARNING("Process ~p abort with ~p", [self(), V]),
-            ?cc_process_on_exit(get_ctl(), self(), {{nocatch, R}, ST})
+            ?cc_process_on_exit(get_ctl(), process_exit, self(), {{nocatch, R}, ST})
     end,
     become_tomb().
 
@@ -2188,7 +2200,7 @@ hibernate_entry(M, F, A) ->
 handle_erlang('!', [T, M], Aux) ->
     handle_erlang(send, [T, M], Aux);
 handle_erlang(send, [Pid, M], {_Old, _New, Ann}) when is_pid(Pid) ->
-    {ok, R} = ?cc_send_msg(get_ctl(), self(), Ann, Pid, M),
+    {ok, R} = ?cc_send_msg(get_ctl(), Ann, self(), Pid, M),
     case R of
         ok ->
             M;
@@ -2196,16 +2208,16 @@ handle_erlang(send, [Pid, M], {_Old, _New, Ann}) when is_pid(Pid) ->
             ?WARNING("Ignored external message ~p to ~p", [M, Pid]),
             M
     end;
-handle_erlang(send, [Pid, M, _Opts], _Aux) when is_pid(Pid) ->
+handle_erlang(send, [Pid, M, _Opts], Aux) when is_pid(Pid) ->
     %% options are ignored for now
-    handle_erlang(send, [Pid, M], _Aux),
+    handle_erlang(send, [Pid, M], Aux),
     ok;
 handle_erlang(send, [Name, Msg | Opts], {_Old, _New, Ann}) when is_atom(Name) ->
-    {ok, Ret} = ?cc_whereis(get_ctl(), [], get_node(), Name),
+    {ok, Ret} = ?cc_whereis(get_ctl(), Ann, [], get_node(), Name),
     case Ret of
         {_, Pid} when is_pid(Pid) ->
             %% assume lookup and send is atomic (actually not in Beam VM)
-            {ok, ok} = ?cc_nodelay_send_msg(get_ctl(), self(), Ann, Pid, Msg),
+            {ok, ok} = ?cc_nodelay_send_msg(get_ctl(), Ann, self(), Pid, Msg),
             case Opts of
                 [] -> Msg;
                 _ -> ok
@@ -2216,11 +2228,11 @@ handle_erlang(send, [Name, Msg | Opts], {_Old, _New, Ann}) when is_atom(Name) ->
             error(badarg)
     end;
 handle_erlang(send, [{Name, Node}, Msg | Opts], {_Old, _New, Ann}) when is_atom(Node), is_atom(Name) ->
-    {ok, Ret} = ?cc_whereis(get_ctl(), get_node(), Node, Name),
+    {ok, Ret} = ?cc_whereis(get_ctl(), Ann, get_node(), Node, Name),
     case Ret of
         {_, Pid} when is_pid(Pid) ->
             %% assume lookup and send is atomic (actually not in Beam VM)
-            {ok, ok} = ?cc_nodelay_send_msg(get_ctl(), self(), Ann, Pid, Msg),
+            {ok, ok} = ?cc_nodelay_send_msg(get_ctl(), Ann, self(), Pid, Msg),
             case Opts of
                 [] -> Msg;
                 _ -> ok
@@ -2247,16 +2259,16 @@ handle_erlang(send_after, A, {Old, New, Ann}) ->
     handle(Old, New, call, [morpheus_guest_internal, send_after, A], Ann);
 %% timestamp virtualization. We are also emulating the native time unit to be `millisecond`.
 %% We hope this would be enough
-handle_erlang(monotonic_time, A, _Ann) ->
-    {ok, {Clock, _Offset}} = ?cc_get_clock(get_ctl()),
+handle_erlang(monotonic_time, A, {_Old, _New, Ann}) ->
+    {ok, {Clock, _Offset}} = ?cc_get_clock(get_ctl(), Ann),
     case A of
         [] -> Clock;
         [native] -> Clock;
         [Unit] ->
             erlang:convert_time_unit(Clock, millisecond, Unit)
     end;
-handle_erlang(system_time, A, _Ann) when length(A) =< 1 ->
-    {ok, {Clock, Offset}} = ?cc_get_clock(get_ctl()),
+handle_erlang(system_time, A, {_Old, _New, Ann}) when length(A) =< 1 ->
+    {ok, {Clock, Offset}} = ?cc_get_clock(get_ctl(), Ann),
     SClock = Clock + Offset,
     case A of
         [] -> SClock;
@@ -2264,24 +2276,24 @@ handle_erlang(system_time, A, _Ann) when length(A) =< 1 ->
         [Unit] ->
             erlang:convert_time_unit(SClock, millisecond, Unit)
     end;
-handle_erlang(time_offset, A, _Ann) when length(A) =< 1 ->
-    {ok, {_Clock, Offset}} = ?cc_get_clock(get_ctl()),
+handle_erlang(time_offset, A, {_Old, _New, Ann}) when length(A) =< 1 ->
+    {ok, {_Clock, Offset}} = ?cc_get_clock(get_ctl(), Ann),
     case A of
         [] -> Offset;
         [native] -> Offset;
         [Unit] ->
             erlang:convert_time_unit(Offset, millisecond, Unit)
     end;
-handle_erlang(timestamp, [], _Ann) ->
-    {ok, {Clock, Offset}} = ?cc_get_clock(get_ctl()),
+handle_erlang(timestamp, [], {_Old, _New, Ann}) ->
+    {ok, {Clock, Offset}} = ?cc_get_clock(get_ctl(), Ann),
     SClock = Clock + Offset,
     MegaSecs = SClock div 1000000000,
     Secs = SClock div 1000 - MegaSecs * 1000000,
     MicroSecs = SClock rem 1000 * 1000,
     {MegaSecs, Secs, MicroSecs};
-handle_erlang(now, [], _Ann) ->
-    handle_erlang(timestamp, [], _Ann);
-handle_erlang(convert_time_unit, [N, From, To], _Ann) ->
+handle_erlang(now, [], Aux) ->
+    handle_erlang(timestamp, [], Aux);
+handle_erlang(convert_time_unit, [N, From, To], _Aux) ->
     NewFrom =
         case From of
             native -> millisecond;
@@ -2294,20 +2306,20 @@ handle_erlang(convert_time_unit, [N, From, To], _Ann) ->
         end,
     erlang:convert_time_unit(N, NewFrom, NewTo);
 %% register/unregister/whereis
-handle_erlang(register, [Name, Pid], _Aux) when is_atom(Name), is_pid(Pid) ->
-    {ok, Ret} = ?cc_register_process(get_ctl(), get_node(), Name, Pid),
+handle_erlang(register, [Name, Pid], {_Old, _New, Ann}) when is_atom(Name), is_pid(Pid) ->
+    {ok, Ret} = ?cc_register_process(get_ctl(), Ann, get_node(), Name, Pid),
     case Ret of
         badarg -> error(badarg);
         _ -> Ret
     end;
-handle_erlang(unregister, [Name], _Aux) when is_atom(Name) ->
-    {ok, Ret} = ?cc_unregister(get_ctl(), get_node(), Name),
+handle_erlang(unregister, [Name], {_Old, _New, Ann}) when is_atom(Name) ->
+    {ok, Ret} = ?cc_unregister(get_ctl(), Ann, get_node(), Name),
     case Ret of
         badarg -> error(badarg);
         _ -> Ret
     end;
-handle_erlang(whereis, [Name], _Aux) when is_atom(Name) ->
-    {ok, Ret} = ?cc_whereis(get_ctl(), [], get_node(), Name),
+handle_erlang(whereis, [Name], {_Old, _New, Ann}) when is_atom(Name) ->
+    {ok, Ret} = ?cc_whereis(get_ctl(), Ann, [], get_node(), Name),
     case Ret of
         {_, Pid} ->
             Pid;
@@ -2315,17 +2327,17 @@ handle_erlang(whereis, [Name], _Aux) when is_atom(Name) ->
             undefined
     end;
 %% monitor
-handle_erlang(monitor, [process, Pid], _Aux) when is_pid(Pid) ->
-    {ok, Ref} = ?cc_process_monitor(get_ctl(), self(), [], Pid),
+handle_erlang(monitor, [process, Pid], {_Old, _New, Ann}) when is_pid(Pid) ->
+    {ok, Ref} = ?cc_process_monitor(get_ctl(), Ann, self(), [], Pid),
     case Ref of
         badarg -> error(badarg);
         _ -> Ref
     end;
-handle_erlang(monitor, [process, Name], _Aux) when is_atom(Name) ->
-    {ok, Ref} = ?cc_process_monitor(get_ctl(), self(), [], {Name, get_node()}),
+handle_erlang(monitor, [process, Name], {_Old, _New, Ann}) when is_atom(Name) ->
+    {ok, Ref} = ?cc_process_monitor(get_ctl(), Ann, self(), [], {Name, get_node()}),
     Ref;
-handle_erlang(monitor, [process, {Name, Node}], _Aux) when is_atom(Name), is_atom(Node) ->
-    {ok, Ref} = ?cc_process_monitor(get_ctl(), self(), get_node(), {Name, Node}),
+handle_erlang(monitor, [process, {Name, Node}], {_Old, _New, Ann}) when is_atom(Name), is_atom(Node) ->
+    {ok, Ref} = ?cc_process_monitor(get_ctl(), Ann, self(), get_node(), {Name, Node}),
     case Ref of
         badarg -> error(badarg);
         _ -> Ref
@@ -2336,31 +2348,31 @@ handle_erlang(monitor, [_OtherType, _Object], _Aux) ->
     ?ERROR("Unsupported monitor type ~p of ~p", [_OtherType, _Object]),
     make_ref();
 %% demonitor
-handle_erlang(demonitor, [Ref], _Aux) ->
-    {ok, Ret} = ?cc_process_demonitor(get_ctl(), self(), Ref, []),
+handle_erlang(demonitor, [Ref], {_Old, _New, Ann}) ->
+    {ok, Ret} = ?cc_process_demonitor(get_ctl(), Ann, self(), Ref, []),
     Ret;
-handle_erlang(demonitor, [Ref, Opts], _Aux) ->
-    {ok, Ret} = ?cc_process_demonitor(get_ctl(), self(), Ref, Opts),
+handle_erlang(demonitor, [Ref, Opts], {_Old, _New, Ann}) ->
+    {ok, Ret} = ?cc_process_demonitor(get_ctl(), Ann, self(), Ref, Opts),
     Ret;
 %% spawn
-handle_erlang(spawn, Args, _Aux) ->
-    apply(?MODULE, handle_erlang_spawn, [spawn | Args]);
-handle_erlang(spawn_link, Args, _Aux) ->
-    apply(?MODULE, handle_erlang_spawn, [spawn_link | Args]);
-handle_erlang(spawn_monitor, Args, _Aux) ->
-    apply(?MODULE, handle_erlang_spawn, [spawn_monitor | Args]);
-handle_erlang(spawn_opt, Args, _Aux) ->
-    apply(?MODULE, handle_erlang_spawn_opt, Args);
+handle_erlang(spawn, Args, {_Old, _New, Ann}) ->
+    apply(?MODULE, handle_erlang_spawn, [Ann, spawn | Args]);
+handle_erlang(spawn_link, Args, {_Old, _New, Ann}) ->
+    apply(?MODULE, handle_erlang_spawn, [Ann, spawn_link | Args]);
+handle_erlang(spawn_monitor, Args, {_Old, _New, Ann}) ->
+    apply(?MODULE, handle_erlang_spawn, [Ann, spawn_monitor | Args]);
+handle_erlang(spawn_opt, Args, {_Old, _New, Ann}) ->
+    apply(?MODULE, handle_erlang_spawn_opt, [Ann | Args]);
 %% process_flag trap_exit
-handle_erlang(process_flag, [trap_exit, On], _Aux) ->
-    {ok, {prev, Prev}} = ?cc_process_set_trap_exit(get_ctl(), self(), On),
+handle_erlang(process_flag, [trap_exit, On], {_Old, _New, Ann}) ->
+    {ok, {prev, Prev}} = ?cc_process_set_trap_exit(get_ctl(), Ann, self(), On),
     Prev;
 %% link
-handle_erlang(link, [ProcOrPort], _Aux) ->
+handle_erlang(link, [ProcOrPort], {_Old, _New, Ann}) ->
     Ret =
         if
             is_pid(ProcOrPort) ->
-                case ?cc_process_link(get_ctl(), self(), ProcOrPort) of
+                case ?cc_process_link(get_ctl(), Ann, self(), ProcOrPort) of
                     {ok, noproc} ->
                         error(noproc);
                     {ok, badarg} ->
@@ -2393,15 +2405,15 @@ handle_erlang(exit, [Proc, Reason], {_Old, _New, Ann} = _Aux) ->
         Me ->
             handle_erlang(exit, [Reason], _Aux);
         _ ->
-            {ok, Ret} = ?cc_send_signal(get_ctl(), self(), Ann, Proc, Reason),
+            {ok, Ret} = ?cc_send_signal(get_ctl(), Ann, self(), Proc, Reason),
             Ret
     end;
 %% unlink
-handle_erlang(unlink, [ProcOrPort], _Aux) ->
+handle_erlang(unlink, [ProcOrPort], {_Old, _New, Ann}) ->
     Ret =
     if
         is_pid(ProcOrPort) ->
-            case ?cc_process_unlink(get_ctl(), self(), ProcOrPort) of
+            case ?cc_process_unlink(get_ctl(), Ann, self(), ProcOrPort) of
                 {ok, badarg} ->
                     error(badarg);
                 {ok, InRet} ->
@@ -2431,8 +2443,8 @@ handle_erlang(apply, [F, A], {Old, New, Ann}) ->
 %% process_info
 %% process_info virtualization is very limited now, as there are simply too many stuff ...
 %% So far this is for running some tests (i.e. poolboy)
-handle_erlang(process_info, [Pid, Prop], _Aux) when is_atom(Prop) ->
-    {ok, Ret} = ?cc_process_info(get_ctl(), Pid, [Prop]),
+handle_erlang(process_info, [Pid, Prop], {_Old, _New, Ann}) when is_atom(Prop) ->
+    {ok, Ret} = ?cc_process_info(get_ctl(), Ann, Pid, [Prop]),
     case Ret of
         [] ->
             undefined;
@@ -2444,11 +2456,11 @@ handle_erlang(process_info, [Pid, Prop], _Aux) when is_atom(Prop) ->
         [ItemTuple] ->
             ItemTuple
     end;
-handle_erlang(process_info, [Pid, PropList], _Aux) when is_list(PropList) ->
-    {ok, Ret} = ?cc_process_info(get_ctl(), Pid, PropList),
+handle_erlang(process_info, [Pid, PropList], {_Old, _New, Ann}) when is_list(PropList) ->
+    {ok, Ret} = ?cc_process_info(get_ctl(), Ann, Pid, PropList),
     Ret;
-handle_erlang(process_info, [Pid], _Aux) ->
-    {ok, Ret} = ?cc_process_info(get_ctl(), Pid,
+handle_erlang(process_info, [Pid], {_Old, _New, Ann}) ->
+    {ok, Ret} = ?cc_process_info(get_ctl(), Ann, Pid,
                                  %% all virtualized items that are supposed to return
                                  [registered_name,
                                   monitors,
@@ -2471,15 +2483,15 @@ handle_erlang(process_info, [Pid], _Aux) ->
                         end, [], Original)
     end;
 %% is_process_alive
-handle_erlang(is_process_alive, [Pid], _Aux) when is_pid(Pid) ->
-    {ok, Ret} = ?cc_is_process_alive(get_ctl(), Pid),
+handle_erlang(is_process_alive, [Pid], {_Old, _New, Ann}) when is_pid(Pid) ->
+    {ok, Ret} = ?cc_is_process_alive(get_ctl(), Ann, Pid),
     Ret;
 %% processes
-handle_erlang(processes, [], _Aux) ->
-    {ok, Ret} = ?cc_instrumented_process_list(get_ctl(), get_node()),
+handle_erlang(processes, [], {_Old, _New, Ann}) ->
+    {ok, Ret} = ?cc_instrumented_process_list(get_ctl(), Ann, get_node()),
     Ret;
-handle_erlang(registered, [], _Aux) ->
-    {ok, Ret} = ?cc_instrumented_registered_list(get_ctl(), get_node()),
+handle_erlang(registered, [], {_Old, _New, Ann}) ->
+    {ok, Ret} = ?cc_instrumented_registered_list(get_ctl(), Ann, get_node()),
     Ret;
 handle_erlang(erase, [], _Aux) ->
     %% Keep sandbox info after erase
@@ -2490,12 +2502,12 @@ handle_erlang(erase, [], _Aux) ->
                         end
                 end, [], erase());
 %% always return positive and monotonic integers ...
-handle_erlang(unique_integer, _Args, _Aux) ->
-    {ok, I} = ?cc_unique_integer(get_ctl()),
+handle_erlang(unique_integer, _Args, {_Old, _New, Ann}) ->
+    {ok, I} = ?cc_unique_integer(get_ctl(), Ann),
     I;
 %% hibernate
-handle_erlang(hibernate, [M, F, A], _Aux) ->
-    {M0, F0, A0} = rewrite_call(M, F, A),
+handle_erlang(hibernate, [M, F, A], {_Old, _New, Ann}) ->
+    {M0, F0, A0} = rewrite_call(Ann, M, F, A),
     self() ! morpheus_internal_hibernate_wakeup,
     erlang:hibernate(?MODULE, hibernate_entry, [M0, F0, A0]);
 %% HACK, this is for rand! hopefully we don't mess up other things
@@ -2508,36 +2520,36 @@ handle_erlang(phash2, [Term], _Aux) ->
         _ ->
             erlang:phash2(Term)
     end;
-handle_erlang(open_port, A, _Aux) ->
+handle_erlang(open_port, A, {_Old, _New, Ann}) ->
     R = apply(erlang, open_port, A),
-    ?cc_undet(get_ctl()),
+    ?cc_undet(get_ctl(), Ann),
     R;
-handle_erlang(port_command, A, _Aux) ->
+handle_erlang(port_command, A, {_Old, _New, Ann}) ->
     R = apply(erlang, port_command, A),
-    ?cc_undet(get_ctl()),
+    ?cc_undet(get_ctl(), Ann),
     R;
-handle_erlang(port_connect, A, _Aux) ->
+handle_erlang(port_connect, A, {_Old, _New, Ann}) ->
     R = apply(erlang, port_connect, A),
-    ?cc_undet(get_ctl()),
+    ?cc_undet(get_ctl(), Ann),
     R;
-handle_erlang(port_control, A, _Aux) ->
+handle_erlang(port_control, A, {_Old, _New, Ann}) ->
     R = apply(erlang, port_control, A),
-    ?cc_undet(get_ctl()),
+    ?cc_undet(get_ctl(), Ann),
     R;
-handle_erlang(port_close, A, _Aux) ->
+handle_erlang(port_close, A, {_Old, _New, Ann}) ->
     R = apply(erlang, port_close, A),
-    ?cc_undet(get_ctl()),
+    ?cc_undet(get_ctl(), Ann),
     R;
 %% Cannot be global
-handle_erlang(setnode, [Name, Creation], _Aux) ->
+handle_erlang(setnode, [Name, Creation], {_Old, _New, Ann}) ->
     ?INFO("called erlang:setnode(~p, ~p)", [Name, Creation]),
     MyNode = get_node(),
     case Name of
         ?LOCAL_NODE_NAME ->
-            {ok, Ret} = call_ctl(get_ctl(), {node_set_alive, get_node(), false}),
+            {ok, Ret} = call_ctl(get_ctl(), Ann, {node_set_alive, get_node(), false}),
             Ret;
         MyNode ->
-            {ok, Ret} = call_ctl(get_ctl(), {node_set_alive, get_node(), true}),
+            {ok, Ret} = call_ctl(get_ctl(), Ann, {node_set_alive, get_node(), true}),
             Ret;
         _ ->
             error(name_not_match)
@@ -2548,10 +2560,10 @@ handle_erlang(monitor_node, [_Node, _Flag], _Aux) ->
 handle_erlang(monitor_node, [_Node, _Flag, _Options], _Aux) ->
     true;
 %%
-handle_erlang(nodes, [], _Aux) ->
-    handle_erlang(nodes, [visible], _Aux);
-handle_erlang(nodes, [L], _Aux) ->
-    {ok, Ret} = ?cc_list_nodes(get_ctl(), get_node(), L),
+handle_erlang(nodes, [], Aux) ->
+    handle_erlang(nodes, [visible], Aux);
+handle_erlang(nodes, [L], {_Old, _New, Ann}) ->
+    {ok, Ret} = ?cc_list_nodes(get_ctl(), Ann, get_node(), L),
     Ret;
 %%
 handle_erlang(node, [], _Aux) ->
@@ -2587,7 +2599,7 @@ handle_erlang(get, [], _Aux) ->
 handle_erlang(F, A, _Aux) ->
     apply(erlang, F, A).
 
-handle_erlang_spawn(S, F) ->
+handle_erlang_spawn(Where, S, F) ->
     Ctl = get_ctl(),
     Node = get_node(),
     Opt = get_opt(),
@@ -2596,9 +2608,9 @@ handle_erlang_spawn(S, F) ->
                         instrumented_process_start(Ctl, Node, Opt, ShTab),
                         instrumented_process_end(?CATCH(F()))
                 end),
-    post_spawn(S, Ctl, ShTab, Node, Pid).
+    post_spawn(S, Ctl, Where, ShTab, Node, Pid).
 
-handle_erlang_spawn(S, Node, F) ->
+handle_erlang_spawn(Where, S, Node, F) ->
     Ctl = get_ctl(),
     Opt = get_opt(),
     ShTab = get_shtab(),
@@ -2606,14 +2618,14 @@ handle_erlang_spawn(S, Node, F) ->
                         instrumented_process_start(Ctl, Node, Opt, ShTab),
                         instrumented_process_end(?CATCH(F()))
                 end),
-    post_spawn(S, Ctl, ShTab, Node, Pid).
+    post_spawn(S, Ctl, Where, ShTab, Node, Pid).
 
-handle_erlang_spawn(S, M, F, A) ->
+handle_erlang_spawn(Where, S, M, F, A) ->
     Ctl = get_ctl(),
     Node = get_node(),
     Opt = get_opt(),
     ShTab = get_shtab(),
-    {ok, NewM, NewName} = get_instrumented_func(Ctl, M, F, length(A)),
+    {ok, NewM, NewName} = get_instrumented_func(Ctl, Where, M, F, length(A)),
     case NewM of
         M ->
             ?WARNING("Trying to spwan a process with nif entry ~p - this may go wild!", [{M, F, A}]);
@@ -2623,13 +2635,13 @@ handle_erlang_spawn(S, M, F, A) ->
                         instrumented_process_start(Ctl, Node, Opt, ShTab),
                         instrumented_process_end(?CATCH(apply(NewM, NewName, A)))
                 end),
-    post_spawn(S, Ctl, ShTab, Node, Pid).
+    post_spawn(S, Ctl, Where, ShTab, Node, Pid).
 
-handle_erlang_spawn(S, Node, M, F, A) ->
+handle_erlang_spawn(Where, S, Node, M, F, A) ->
     Ctl = get_ctl(),
     Opt = get_opt(),
     ShTab = get_shtab(),
-    {ok, NewM, NewName} = get_instrumented_func(Ctl, M, F, length(A)),
+    {ok, NewM, NewName} = get_instrumented_func(Ctl, Where, M, F, length(A)),
     case NewM of
         M ->
             ?WARNING("Trying to spwan a process with nif entry ~p - this may go wild!", [{M, F, A}]);
@@ -2639,19 +2651,19 @@ handle_erlang_spawn(S, Node, M, F, A) ->
                         instrumented_process_start(Ctl, Node, Opt, ShTab),
                         instrumented_process_end(?CATCH(apply(NewM, NewName, A)))
                 end),
-    post_spawn(S, Ctl, ShTab, Node, Pid).
+    post_spawn(S, Ctl, Where, ShTab, Node, Pid).
 
-post_spawn(S, Ctl, ShTab, Node, Pid) ->
-    instrumented_process_created(Ctl, ShTab, Node, Pid),
+post_spawn(S, Ctl, Where, ShTab, Node, Pid) ->
+    instrumented_process_created(Ctl, Where, ShTab, Node, Pid),
     Ret =
         case S of
             spawn ->
                 Pid;
             spawn_link ->
-                call_ctl(Ctl, {nodelay, ?cci_process_link(self(), Pid)}),
+                call_ctl(Ctl, Where, {nodelay, ?cci_process_link(self(), Pid)}),
                 Pid;
             spawn_monitor ->
-                {ok, Ref} = call_ctl(Ctl, {nodelay, ?cci_process_monitor(self(), [], Pid)}),
+                {ok, Ref} = call_ctl(Ctl, Where, {nodelay, ?cci_process_monitor(self(), [], Pid)}),
                 {Pid, Ref};
             _ ->
                 ?WARNING("Unhandled spawn type: ~p", S),
@@ -2660,7 +2672,7 @@ post_spawn(S, Ctl, ShTab, Node, Pid) ->
     instrumented_process_kick(Ctl, Node, Pid),
     Ret.
 
-handle_erlang_spawn_opt(F, Opts) ->
+handle_erlang_spawn_opt(Where, F, Opts) ->
     Ctl = get_ctl(),
     Node = get_node(),
     Opt = get_opt(),
@@ -2670,14 +2682,14 @@ handle_erlang_spawn_opt(F, Opts) ->
                     instrumented_process_start(Ctl, Node, Opt, ShTab),
                     instrumented_process_end(?CATCH(F()))
             end),
-    post_spawn_opt(Ctl, ShTab, Node, Pid, Opts).
+    post_spawn_opt(Ctl, Where, ShTab, Node, Pid, Opts).
 
-handle_erlang_spawn_opt(M, F, A, Opts) ->
+handle_erlang_spawn_opt(Where, M, F, A, Opts) ->
     Ctl = get_ctl(),
     Node = get_node(),
     Opt = get_opt(),
     ShTab = get_shtab(),
-    {ok, NewM, NewName} = get_instrumented_func(Ctl, M, F, length(A)),
+    {ok, NewM, NewName} = get_instrumented_func(Ctl, Where, M, F, length(A)),
     case NewM of
         M ->
             ?WARNING("Trying to spwan a process with nif entry ~p - this may go wild!", [{M, F, A}]);
@@ -2688,19 +2700,19 @@ handle_erlang_spawn_opt(M, F, A, Opts) ->
                     instrumented_process_start(Ctl, Node, Opt, ShTab),
                     instrumented_process_end(?CATCH(apply(NewM, NewName, A)))
             end),
-    post_spawn_opt(Ctl, ShTab, Node, Pid, Opts).
+    post_spawn_opt(Ctl, Where, ShTab, Node, Pid, Opts).
 
-post_spawn_opt(Ctl, ShTab, Node, Pid, Opts) ->
-    instrumented_process_created(Ctl, ShTab, Node, Pid),
+post_spawn_opt(Ctl, Where, ShTab, Node, Pid, Opts) ->
+    instrumented_process_created(Ctl, Where, ShTab, Node, Pid),
     case lists:member(link, Opts) of
         true ->
-            call_ctl(Ctl, {nodelay, ?cci_process_link(self(), Pid)});
+            call_ctl(Ctl, Where, {nodelay, ?cci_process_link(self(), Pid)});
         false -> ok
     end,
     Ret =
         case lists:member(monitor, Opts) of
             true ->
-                {ok, Ref} = call_ctl(Ctl, {nodelay, ?cci_process_monitor(self(), [], Pid)}),
+                {ok, Ref} = call_ctl(Ctl, Where, {nodelay, ?cci_process_monitor(self(), [], Pid)}),
                 {Pid, Ref};
             _ ->
                 Pid
@@ -2749,33 +2761,33 @@ handle_io(F, A, _Aux) ->
             apply(io, F, [user | A])
     end.
 
-detect_file_op_race(IoDev, Start, Size, Type) ->
+detect_file_op_race(Where, IoDev, Start, Size, Type) ->
     IOList = [{{iodev, IoDev}, Start, Size, Type}],
-    {ok, R} = ?cc_resource_acquire(get_ctl(), IOList),
+    {ok, R} = ?cc_resource_acquire(get_ctl(), Where, IOList),
     case R of
         [] -> ok;
         _ ->
             {_, _, ST} = ?CATCH( throw(gimme_stacktrace) ),
             ?WARNING("Race on file operation found~nStack: ~p", [ST])
     end,
-    {ok, ok} = ?cc_resource_release(get_ctl(), IOList).
+    {ok, ok} = ?cc_resource_release(get_ctl(), Where, IOList).
 
-handle_file(F, A, _Aux) ->
+handle_file(F, A, {_Old, _New, Ann}) ->
     case F of
         pread when length(A) =:= 3 ->
             [IoDev, _Start, _Size] = A,
-            detect_file_op_race(IoDev, 1, 1, read);
+            detect_file_op_race(Ann, IoDev, 1, 1, read);
         pwrite when length(A) =:= 3 ->
             [IoDev, _Start, _Data] = A,
-            detect_file_op_race(IoDev, 1, 1, write);
+            detect_file_op_race(Ann, IoDev, 1, 1, write);
         read ->
             [IoDev, _Size] = A,
             {ok, _Start} = file:position(IoDev, cur),
-            detect_file_op_race(IoDev, 1, 1, read);
+            detect_file_op_race(Ann, IoDev, 1, 1, read);
         write ->
             [IoDev, _Data] = A,
             {ok, _Start} = file:position(IoDev, cur),
-            detect_file_op_race(IoDev, 1, 1, write);
+            detect_file_op_race(Ann, IoDev, 1, 1, write);
         _ -> ok
     end,
     apply(file, F, A).
@@ -2785,7 +2797,7 @@ handle_file(F, A, _Aux) ->
 handle_ets(F, A, {_Old, _New, Ann}) ->
     case F of
         all ->
-            {ok, Ret} = ?cc_ets_all(get_ctl()),
+            {ok, Ret} = ?cc_ets_all(get_ctl(), Ann),
             lists:map(fun (Name) ->
                         if
                             is_atom(Name) ->
@@ -2795,7 +2807,7 @@ handle_ets(F, A, {_Old, _New, Ann}) ->
                         end
                       end, Ret);
         _ ->
-            call_ctl(get_ctl(), {maybe_delay, {log, {ets_op, F, A}}}),
+            call_ctl(get_ctl(), Ann, {maybe_delay, {log, {ets_op, F, A}}}),
             %% essentially we are trying to virtualize the ets namespace
             if
                 F =:= file2tab; F =:= tabfile_info; F =:= module_info; A =:= [] ->
@@ -2870,7 +2882,7 @@ handle_ets(F, A, {_Old, _New, Ann}) ->
                         end,
                     Result = apply(ets, F, [RealTid, Pid, morpheus_internal]),
                     GiveMsg = {'ETS-TRANSFER', Tid, self(), GiftData},
-                    {ok, ok} = ?cc_send_msg(get_ctl(), self(), Ann, Pid, GiveMsg),
+                    {ok, ok} = ?cc_send_msg(get_ctl(), Ann, self(), Pid, GiveMsg),
                     Result;
                 true ->
                     [Tid | Rest] = A,
@@ -2910,11 +2922,11 @@ decode_ets_name(Name) ->
 
 start_node(Node, M, F, A) ->
     Ctl = get_ctl(),
-    {ok, ok} = ?cc_node_created(Ctl, Node),
+    {ok, ok} = ?cc_node_created(Ctl, node_start, Node),
     Opt = get_opt(),
     ShTab = get_shtab(),
-    {ok, EM, EF} = get_instrumented_func(Ctl, M, F, length(A)),
-    {ok, GIM, GIF} = get_instrumented_func(Ctl, morpheus_guest_internal, init, []),
+    {ok, EM, EF} = get_instrumented_func(Ctl, node_start, M, F, length(A)),
+    {ok, GIM, GIF} = get_instrumented_func(Ctl, node_start, morpheus_guest_internal, init, []),
     Pid = spawn(fun () ->
                         %% virtual init process!
                         erlang:group_leader(self(), self()),
@@ -2922,7 +2934,7 @@ start_node(Node, M, F, A) ->
                         apply(GIM, GIF, []),
                         instrumented_process_end(?CATCH(apply(EM, EF, A)))
                 end),
-    instrumented_process_created(Ctl, ShTab, Node, Pid),
+    instrumented_process_created(Ctl, node_start, ShTab, Node, Pid),
     instrumented_process_kick(Ctl, Node, Pid),
     Ctl.
 

@@ -13,7 +13,7 @@
         ]).
 
 call_ctl(Args) ->
-    morpheus_sandbox:call_ctl(morpheus_sandbox:get_ctl(), Args).
+    morpheus_sandbox:call_ctl(morpheus_sandbox:get_ctl(), undefined, Args).
 
 cast_ctl(Args) ->
     morpheus_sandbox:cast_ctl(morpheus_sandbox:get_ctl(), Args).
