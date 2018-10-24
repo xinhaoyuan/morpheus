@@ -13,28 +13,28 @@ all_test_() ->
 t_basic() ->
     {Ctl, MRef} = morpheus_sandbox:start(?MODULE, basic_test_entry, [],
                                          [ monitor ]),
-    normal = receive {'DOWN', MRef, _, _, Reason} -> Reason end,
+    success = receive {'DOWN', MRef, _, _, Reason} -> Reason end,
     ok.
 
 basic_test_entry() ->
-    morpheus_guest_helper:bootstrap_real(),
+    morpheus_guest_helper:bootstrap(),
     Output = os:cmd("ls"),
     io:format(user, "ls output ~p~n", [Output]),
-    morpheus_guest_helper:cleanup(),
+    morpheus_guest:exit_with(success),
     ok.
 
 t_crypto() ->
     {Ctl, MRef} = morpheus_sandbox:start(?MODULE, crypto_test_entry, [],
                                          [ monitor
                                          , {undet_nifs, [ {crypto, hash, 2} ]}]),
-    normal = receive {'DOWN', MRef, _, _, Reason} -> Reason end,
+    success = receive {'DOWN', MRef, _, _, Reason} -> Reason end,
     ok.
 
 crypto_test_entry() ->
-    morpheus_guest_helper:bootstrap_real(),
+    morpheus_guest_helper:bootstrap(),
     application:load(crypto),
     application:ensure_started(crypto),
 
     crypto:hash(sha, <<"abc">>),
-    morpheus_guest_helper:cleanup(),
+    morpheus_guest:exit_with(success),
     ok.
