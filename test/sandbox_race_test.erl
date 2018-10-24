@@ -28,7 +28,7 @@ t_basic() ->
 -define(G, morpheus_guest).
 
 basic_test_entry() ->
-    ?GH:bootstrap_real(),
+    ?GH:bootstrap(),
     {ok, Fd} = file:open("test.txt", [write, binary]),
     %% ?GH:sync_task(
     %%    [ par

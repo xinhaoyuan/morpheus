@@ -164,13 +164,15 @@ instrument_core_tree(Tree, {{CtlMod, OriginalModule, NewModule} = Opt, CtlState,
                               Body = cerl:fun_body(DT),
                               IsNifStub = lists:member(nif_stub, cerl:get_ann(DT)),
                               ToExposeL =
-                                  case CtlMod:to_expose(CtlState, OriginalModule, F, A) of
+                                  case erlang:function_exported(CtlMod, to_expose, 4)
+                                      andalso CtlMod:to_expose(CtlState, OriginalModule, F, A) of
                                       true ->
                                           [{F, A} | ToExposeL0];
                                       false ->
                                           ToExposeL0
                                   end,
-                              case CtlMod:to_override(CtlState, OriginalModule, F, A) of 
+                              case erlang:function_exported(CtlMod, to_override, 4)
+                                  andalso CtlMod:to_override(CtlState, OriginalModule, F, A) of
                                   {true, Action}
                                     when Action =:= trace; Action =:= callback ->
                                       OrigName =

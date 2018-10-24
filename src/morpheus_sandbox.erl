@@ -221,9 +221,9 @@ ctl_trace_receive_real(_Opt, _SHT,
 %% {abs_id, PID} -> [Node, PList] - shared mapping of abstract id of process
 
 -ifdef(OTP_RELEASE).
--define(CATCH(EXP),(try {ok, EXP} catch error:R:ST -> {error, R, ST}; exit:R:ST -> {exit, R, ST}; throw:R:ST -> {throw, R, ST} end)).
+-define(CATCH(EXP), ((fun () -> try {ok, EXP} catch error:R:ST -> {error, R, ST}; exit:R:ST -> {exit, R, ST}; throw:R:ST -> {throw, R, ST} end end)())).
 -else.
--define(CATCH(EXP), (try {ok, EXP} catch error:R -> {error, R, erlang:get_stacktrace()}; exit:R -> {exit, R, erlang:get_stacktrace()}; throw:R -> {throw, R, erlang:get_stacktrace()} end)).
+-define(CATCH(EXP), ((fun () -> try {ok, EXP} catch error:R -> {error, R, erlang:get_stacktrace()}; exit:R -> {exit, R, erlang:get_stacktrace()}; throw:R -> {throw, R, erlang:get_stacktrace()} end end)())).
 -endif.
 
 ctl_init(Opts) ->

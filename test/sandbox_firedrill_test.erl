@@ -17,6 +17,6 @@ t_basic() ->
                     [ monitor
                     , {firedrill_scheduler, whereis(fd_sched)}
                     ]),
-    normal = receive {'DOWN', MRef, _, _, Reason} -> Reason end,
+    success = receive {'DOWN', MRef, _, _, Reason} -> Reason end,
     firedrill:stop(),
     ok.

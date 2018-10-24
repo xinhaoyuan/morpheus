@@ -10,7 +10,12 @@ all_test_() ->
     ].
 
 t_basic() ->
-    io:format(user, "outside: hello from ~p~n", [morpheus_guest:get_node()]),
+    try
+        morpheus_guest:get_node(),
+        error(unexpected)
+    catch
+        error:not_in_sandbox -> ok
+    end,
     {Ctl, MRef} = morpheus_sandbox:start(?MODULE, basic_test_entry, [], [monitor]),
     normal = receive {'DOWN', MRef, _, _, Reason} -> Reason end,
     ok.

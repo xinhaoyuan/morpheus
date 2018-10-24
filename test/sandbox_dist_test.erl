@@ -21,7 +21,7 @@ t_basic() ->
     ok.
 
 basic_test_entry() ->
-    morpheus_guest_helper:bootstrap_real(),
+    morpheus_guest_helper:bootstrap(),
     net_kernel:start([test@localhost]),
     io:format(user, "node ~p~n", [node()]),
     morpheus_guest_helper:cleanup(),
@@ -37,7 +37,7 @@ t_two_nodes() ->
     ok.
 
 two_nodes_test_entry() ->
-    morpheus_guest_helper:bootstrap_real(),
+    morpheus_guest_helper:bootstrap(),
     io:format(user, "before node ~p~n", [node()]),
     net_kernel:start([test@localhost]),
     io:format(user, "node ~p~n", [node()]),
@@ -45,7 +45,7 @@ two_nodes_test_entry() ->
     ok.
 
 node2_entry() ->
-    morpheus_guest_helper:bootstrap_real(),
+    morpheus_guest_helper:bootstrap(),
     io:format(user, "before node ~p~n", [node()]),
     net_kernel:start([test2@localhost]),
     io:format(user, "after node ~p~n", [node()]),
@@ -61,8 +61,8 @@ t_remote_node() ->
     ok.
 
 remote_node_entry() ->
-    morpheus_guest_helper:bootstrap_real_remote(test2@localhost),
-    morpheus_guest_helper:bootstrap_real(test@localhost),
+    morpheus_guest_helper:bootstrap_remote(test2@localhost),
+    morpheus_guest_helper:bootstrap(test@localhost),
     ok = rpc:call(test2@localhost, ?MODULE, print_node, []),
     [] = nodes() -- [test2@localhost],
     morpheus_guest:exit_with(success),
