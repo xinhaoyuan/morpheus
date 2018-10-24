@@ -19,3 +19,4 @@ rebar3.crashdump
 .erlang.mk
 *.d
 deps
+TAGS
