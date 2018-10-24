@@ -29,7 +29,7 @@ t_basic() ->
 
 basic_test_entry() ->
     ?GH:bootstrap(),
-    {ok, Fd} = file:open("test.txt", [write, binary]),
+    {ok, Fd} = file:open("/tmp/test.txt", [write, binary]),
     %% ?GH:sync_task(
     %%    [ par
     %%    , fun () ->
