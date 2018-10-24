@@ -1810,22 +1810,22 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT} = S, Reason) ->
 
 -define(weight_race, 10).
 
-%% detect_req_race(S, Where, ?cci_send_msg(_, To, Msg), WaitingReqs) ->
-%%     dict:fold(
-%%       fun (_, {OWhere, _, ?cci_send_msg(_, OTo, OMsg)}, CurS)
-%%             when OTo =:= To ->
-%%               %% concurrent message sending to the same receiver
-%%               %% ?INFO("Found message race between ~p and ~p~n", [Where, OWhere]),
-%%               Self = {Where, ?H:replace_pid(Msg, fun (P) when is_pid(P) -> '$pid$'; (P) when is_port(P) -> '$port$'; (P) when is_reference(P) -> '$ref$'; (P) -> P end)},
-%%               Other = {OWhere, ?H:replace_pid(OMsg, fun (P) when is_pid(P) -> '$pid$'; (P) when is_port(P) -> '$port$'; (P) when is_reference(P) -> '$ref$'; (P) -> P end)},
-%%               #sandbox_state{weight_table = WT} = CurS,
-%%               CurS#sandbox_state{
-%%                 weight_table =
-%%                     dict:store(Other, ?weight_race, dict:store(Self, ?weight_race, WT))
-%%                };
-%%           (_, _, CurS) ->
-%%               CurS
-%%       end, S, WaitingReqs);
+detect_req_race(S, Where, ?cci_send_msg(_, To, Msg), WaitingReqs) ->
+    dict:fold(
+      fun (_, {OWhere, _, ?cci_send_msg(_, OTo, OMsg)}, CurS)
+            when OTo =:= To ->
+              %% concurrent message sending to the same receiver
+              %% ?INFO("Found message race between ~p and ~p~n", [Where, OWhere]),
+              %% Self = {Where, ?H:replace_pid(Msg, fun (P) when is_pid(P) -> '$pid$'; (P) when is_port(P) -> '$port$'; (P) when is_reference(P) -> '$ref$'; (P) -> P end)},
+              %% Other = {OWhere, ?H:replace_pid(OMsg, fun (P) when is_pid(P) -> '$pid$'; (P) when is_port(P) -> '$port$'; (P) when is_reference(P) -> '$ref$'; (P) -> P end)},
+              #sandbox_state{weight_table = WT} = CurS,
+              CurS#sandbox_state{
+                weight_table =
+                    dict:store(Where, ?weight_race, dict:store(OWhere, ?weight_race, WT))
+               };
+          (_, _, CurS) ->
+              CurS
+      end, S, WaitingReqs);
 detect_req_race(S, _, _, _) ->
     S.
 
