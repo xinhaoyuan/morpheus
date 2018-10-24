@@ -101,6 +101,7 @@
         , undet_signals    :: integer()
         , undet_kick       :: undefined | reference()
         , undet_nifs       :: [{atom(), atom(), integer()} | {atom(), atom()} | {atom()} | atom()]
+        , weight_table     :: dict:dict()
         }).
 
 ctl_state_format(S) ->
@@ -108,7 +109,8 @@ ctl_state_format(S) ->
       S#sandbox_state{
         abs_id_table = dict:to_list(S#sandbox_state.abs_id_table),
         waiting = dict:to_list(S#sandbox_state.waiting),
-        res_table = dict:to_list(S#sandbox_state.res_table)
+        res_table = dict:to_list(S#sandbox_state.res_table),
+        weight_table = dict:to_list(S#sandbox_state.weight_table)
        },
       %% Must do case by case since record_info doesn't take variables
       fun (sandbox_opt, Size) ->
@@ -161,7 +163,7 @@ ctl_trace_receive(#sandbox_opt{aux_module = Aux} = Opt, SHT,
         orelse not erlang:function_exported(Aux, trace_receive_filter, 3)
         orelse Aux:trace_receive_filter(To, Type, Content) of
         true ->
-            ctl_trace_receive_real(Opt, SHT, To, Where, Type, Content);
+            ctl_trace_receive_real(Opt, SHT, Where, To, Type, Content);
         _ ->
             ok
     end.
@@ -266,6 +268,7 @@ ctl_init(Opts) ->
         , undet_signals = 0
         , undet_kick = undefined
         , undet_nifs = proplists:get_value(undet_nifs, Opts, [])
+        , weight_table = dict:new()
         },
     S.
 
@@ -450,7 +453,7 @@ ctl_push_request_to_buffer(
                                 from = self(),
                                 to = ctl_call_target(Req),
                                 type = ctl_call_target_type(Req),
-                                data = hidden_by_morpheus
+                                data = #{where => Where}
                                },
                   Req}
                  | Buffer],
@@ -485,28 +488,48 @@ ctl_pop_request_from_buffer(#sandbox_state{waiting_counter = WC, waiting = Waiti
         error ->
             error(pop_request_failed);
         {{Where, ReplyTo, Req}, NewWaiting} ->
+            S1 = detect_req_race(S, Where, Req, NewWaiting),
             case ReplyTo of
                 undet ->
                     %% undet async request
-                    {S#sandbox_state{waiting_counter = WC - 1,
-                                     waiting = NewWaiting},
+                    {S1#sandbox_state{
+                       waiting_counter = WC - 1,
+                       waiting = NewWaiting},
                      Where, ReplyTo, Ref, Req};
                 timeout ->
-                    {S#sandbox_state{waiting_counter = WC - 1,
-                                     waiting = NewWaiting},
+                    {S1#sandbox_state{
+                       waiting_counter = WC - 1,
+                       waiting = NewWaiting},
                      Where, ReplyTo, Ref, Req};
                 _ ->
-                    {S#sandbox_state{alive = [ReplyTo | S#sandbox_state.alive],
-                                     alive_counter = S#sandbox_state.alive_counter + 1,
-                                     waiting_counter = WC - 1,
-                                     waiting = NewWaiting},
+                    {S1#sandbox_state{
+                       alive = [ReplyTo | S#sandbox_state.alive],
+                       alive_counter = S#sandbox_state.alive_counter + 1,
+                       waiting_counter = WC - 1,
+                       waiting = NewWaiting},
                      Where, ReplyTo, Ref, Req}
             end
     end.
 
-ctl_push_request_to_scheduler(#sandbox_state{opt = #sandbox_opt{fd_scheduler = Sched}} = S,
+ctl_push_request_to_scheduler(#sandbox_state{ opt = #sandbox_opt{fd_scheduler = Sched}
+                                            , proc_shtable = SHT
+                                            , weight_table = WT} = S,
                               Req) when Sched =/= undefined ->
-    Sched ! Req,
+    #fd_delay_req{data = #{where := Where} = Data} = Req,
+    Weight = case ?SHTABLE_GET(SHT, race_weighted) of
+                 {_, true} ->
+                     case dict:find(Where, WT) of
+                         {ok, W} ->
+                             %% ?INFO("Delay req ~p with weight ~p", [Req, W]),
+                             W;
+                         error ->
+                             %% ?INFO("Delay req ~p without weight", [Req]),
+                             1
+                     end;
+                 _ ->
+                     1
+             end,
+    Sched ! Req#fd_delay_req{data = Data#{weight => Weight}},
     S.
 
 ctl_notify_scheduler(#sandbox_state{opt = #sandbox_opt{fd_scheduler = Sched}} = S)
@@ -656,13 +679,13 @@ ctl_loop_call(S, Where, ToTrace,
               ReplyTo, Ref, Req) ->
     case ToTrace of
         true ->
-            ?INFO("ctl req ~p", [Req]);
+            ?INFO("ctl req from ~w@~p:~n  ~p", [ReplyTo, Where, Req]);
         false -> ok
     end,
     {NewS, Ret} = ctl_handle_call(S, Where, Req),
     case ToTrace of
         true ->
-            ?INFO("ctl resp ~p", [Ret]);
+            ?INFO("ctl resp:~n  ~p", [Ret]);
         false -> ok
     end,
     case ReplyTo of
@@ -1736,11 +1759,13 @@ ctl_process_send_signal( #sandbox_state
     end.
 
 ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT} = S, Reason) ->
+    #sandbox_state{weight_table = WT} = S,
+    ?INFO("Weight table:~n  ~p", [dict:to_list(WT)]),
     case Reason of
         normal ->
             ok;
         _ ->
-            ?INFO( "ctl cast stop with reason ~p", [Reason])
+            ?INFO("ctl cast stop with reason ~p", [Reason])
     end,
     ?TABLE_FOLD(MT,
                 fun ({Old, {New, _Nifs}}, _) ->
@@ -1780,6 +1805,29 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT} = S, Reason) ->
             firedrill:stop()
     end,
     exit(Reason).
+
+%% research code - message race detection
+
+-define(weight_race, 10).
+
+%% detect_req_race(S, Where, ?cci_send_msg(_, To, Msg), WaitingReqs) ->
+%%     dict:fold(
+%%       fun (_, {OWhere, _, ?cci_send_msg(_, OTo, OMsg)}, CurS)
+%%             when OTo =:= To ->
+%%               %% concurrent message sending to the same receiver
+%%               %% ?INFO("Found message race between ~p and ~p~n", [Where, OWhere]),
+%%               Self = {Where, ?H:replace_pid(Msg, fun (P) when is_pid(P) -> '$pid$'; (P) when is_port(P) -> '$port$'; (P) when is_reference(P) -> '$ref$'; (P) -> P end)},
+%%               Other = {OWhere, ?H:replace_pid(OMsg, fun (P) when is_pid(P) -> '$pid$'; (P) when is_port(P) -> '$port$'; (P) when is_reference(P) -> '$ref$'; (P) -> P end)},
+%%               #sandbox_state{weight_table = WT} = CurS,
+%%               CurS#sandbox_state{
+%%                 weight_table =
+%%                     dict:store(Other, ?weight_race, dict:store(Self, ?weight_race, WT))
+%%                };
+%%           (_, _, CurS) ->
+%%               CurS
+%%       end, S, WaitingReqs);
+detect_req_race(S, _, _, _) ->
+    S.
 
 %% instrumentation callbacks - called by morpheus_instrument
 
@@ -2245,7 +2293,7 @@ handle_erlang(send, [{Name, Node}, Msg | Opts], {_Old, _New, Ann}) when is_atom(
             end
     end;
 handle_erlang(send, _Args, _Aux) ->
-    error(unhandled_send);
+    error(badarg);
 handle_erlang(send_nosuspend, A, _Aux) ->
     handle_erlang(send, A, _Aux);
 %% time api
@@ -2794,6 +2842,11 @@ handle_file(F, A, {_Old, _New, Ann}) ->
 
 %% sandboxed lib ets handling
 
+real_tid(Tid) when is_atom(Tid) ->
+    encode_ets_name(Tid);
+real_tid(TRef) ->
+    TRef.
+
 handle_ets(F, A, {_Old, _New, Ann}) ->
     case F of
         all ->
@@ -2814,20 +2867,10 @@ handle_ets(F, A, {_Old, _New, Ann}) ->
                     apply(ets, F, A);
                 F =:= foldl; F =:= foldr ->
                     [Fun, Acc, Tab] = A,
-                    if
-                        is_atom(Tab) ->
-                            apply(ets, F, [Fun, Acc, encode_ets_name(Tab)]);
-                        true ->
-                            apply(ets, F, A)
-                    end;
+                    apply(ets, F, [Fun, Acc, real_tid(Tab)]);
                 F =:= info, length(A) =:= 1 ->
                     [Tab] = A,
-                    case if
-                             is_atom(Tab) ->
-                                 apply(ets, F, [encode_ets_name(Tab)]);
-                             true ->
-                                 apply(ets, F, A)
-                         end of
+                    case apply(ets, F, [real_tid(Tab)]) of
                         List when is_list(List) ->
                             lists:foldr(
                               fun ({K, V}, R) ->
@@ -2843,20 +2886,35 @@ handle_ets(F, A, {_Old, _New, Ann}) ->
                     end;
                 F =:= info, length(A) =:= 2 ->
                     [Tab, Item] = A,
-                    Result =
-                        if
-                            is_atom(Tab) ->
-                                apply(ets, F, [encode_ets_name(Tab), Item]);
-                            true ->
-                                apply(ets, F, A)
-                        end,
+                    Result = apply(ets, F, [real_tid(Tab), Item]),
                     case Item of
                         name when Result =/= undefined  ->
                             decode_ets_name(Result);
                         _Other ->
                             Result
                     end;
-                F =:= new ->
+                F =:= rename, length(A) =:= 2 ->
+                    ?INFO("ets:rename ~p", [A]),
+                    [Tid, NewName] = A,
+                    RealTid = real_tid(Tid),
+                    RealNewName = encode_ets_name(NewName),
+                    R = apply(ets, F, [RealTid, RealNewName]),
+                    %% This is only after normal execution
+                    case is_atom(Tid) andalso R =:= RealNewName of
+                        true ->
+                            SHT = get_shtab(),
+                            case ?SHTABLE_GET(SHT, {heir, RealTid}) of
+                                {_, Data} ->
+                                    ?SHTABLE_SET(SHT, {heir, RealNewName}, Data),
+                                    ?SHTABLE_REMOVE(SHT, {heir, RealTid});
+                                undefined ->
+                                    ok
+                            end;
+                        false ->
+                            ok
+                    end,
+                    R;
+                F =:= new, length(A) =:= 2 ->
                     [Name, Opts] = A,
                     NewName = encode_ets_name(Name),
                     Tid = apply(ets, new, [NewName, Opts]),
@@ -2872,26 +2930,15 @@ handle_ets(F, A, {_Old, _New, Ann}) ->
                         NewName -> Name;
                         _ -> Tid
                     end;
-                F =:= give_away ->
+                F =:= give_away, length(A) =:= 3 ->
                     [Tid, Pid, GiftData] = A,
-                    RealTid =
-                        if
-                            is_atom(Tid) ->
-                                encode_ets_name(Tid);
-                            true -> Tid
-                        end,
-                    Result = apply(ets, F, [RealTid, Pid, morpheus_internal]),
+                    Result = apply(ets, F, [real_tid(Tid), Pid, morpheus_internal]),
                     GiveMsg = {'ETS-TRANSFER', Tid, self(), GiftData},
                     {ok, ok} = ?cc_send_msg(get_ctl(), Ann, self(), Pid, GiveMsg),
                     Result;
                 true ->
                     [Tid | Rest] = A,
-                    RealTid =
-                        if
-                            is_atom(Tid) ->
-                                encode_ets_name(Tid);
-                            true -> Tid
-                        end,
+                    RealTid = real_tid(Tid),
                     Result = apply(ets, F, [RealTid | Rest]),
                     if
                         F =:= setopts ->
@@ -2940,4 +2987,7 @@ start_node(Node, M, F, A) ->
 
 set_flag(tracing, Enabled) ->
     SHT = get_shtab(),
-    ?SHTABLE_SET(SHT, tracing, Enabled).
+    ?SHTABLE_SET(SHT, tracing, Enabled);
+set_flag(race_weighted, Enabled) ->
+    SHT = get_shtab(),
+    ?SHTABLE_SET(SHT, race_weighted, Enabled).

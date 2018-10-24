@@ -241,6 +241,8 @@ ets_entry() ->
                   receive {'ETS-TRANSFER', tab_5, _, hello} -> ok end
           end),
     receive {'ETS-TRANSFER', tab_5, _, hello} -> ok end,
+    spawn(fun () -> ets:new(tab_6, [named_table, {heir, Me, aha}]), ets:rename(tab_6, tab_7) end),
+    receive {'ETS-TRANSFER', tab_7, _, aha} -> ok end,
     morpheus_guest:exit_with(success).
 
 t_random() ->
