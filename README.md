@@ -19,7 +19,7 @@ As a research project, the API may change overtime and the document here may bec
 
 We use the term `host` to refer the program running outside of the sandbox and `guest` for the program inside.
 
-All usage of morpheus starts with the call
+All usage of Morpheus starts with the call
 ```erlang
 morpheus:start(module(), atom(), arity(), [property()]) -> pid() | {pid(), reference()}
 ```
@@ -66,13 +66,13 @@ Due to the lack of documentation, we list the most important options here:
 
    The most useful scheduling options are `{seed, SeedTerm}`,
    which is to enforce the scheduler to follow a random sequence decided by `SeedTerm`.
-   This is to deterministically replay any errors found by the testing.
+   This is to reliably replay any errors found by the testing.
    Without the `{seed, ...}` option, Firedrill would choose seed randomly and print it to console, so we can further use it to replay.
 
 ### Testing with Distributed Erlang Simulation
 
 To test a program with simulated distributed setting.
-We need a patched beam VM with speciallized BIFs.
+We need a patched beam VM with specialized BIFs.
 The patches for supported OTP versions are in `otp-patches`.
 
 Beside of patched VM,
@@ -96,7 +96,7 @@ When an error is found, the following options and functions may be handy to unde
 Examples
 -----
 
-Please see the repo https://github.com/xinhaoyuan/morpheus-app-test for exmaples of testing real applications.
+Please see the repo https://github.com/xinhaoyuan/morpheus-app-test for examples of testing real applications.
 
 Limitations
 -----
@@ -105,7 +105,7 @@ Limitations
 
    Patches are in otp-patches (so far only for OTP-20).
 
- - External inputs (i.e. ports and NIFs) need to be determinisitic given the control of the erlang program.
+ - External inputs (i.e. ports and NIFs) need to be deterministic given the control of the erlang program.
 
    For example, we don't support ports that send back random numbers.
 
