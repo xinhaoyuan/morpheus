@@ -69,6 +69,7 @@
         , fd_opts               :: term()
         , fd_scheduler          :: pid()
         , et_collector          :: pid()
+        , diffiso_port          :: undefined | integer()
         }).
 -record(timeout_entry,
         { type   :: atom()
@@ -244,6 +245,7 @@ ctl_init(Opts) ->
           , fd_opts               = FdOpts
           , fd_scheduler          = FdSched
           , et_collector          = proplists:get_value(et_collector, Opts, undefined)
+          , diffiso_port          = proplists:get_value(diffiso_port, Opts, undefined)
           }
         , initial = true
         , mod_table = ?TABLE_NEW()
@@ -645,6 +647,7 @@ ctl_check_and_receive(#sandbox_state{opt = Opt,
     end.
 
 ctl_call_can_buffer({nodelay, _}) -> false;
+ctl_call_can_buffer(?cci_get_advice()) -> false;
 %% we want the timeout to start soon, so do not buffer.
 ctl_call_can_buffer({undet}) -> false;
 %% {undet, _} is delayable since we need to buffer it
@@ -1492,7 +1495,35 @@ ctl_handle_call(#sandbox_state{res_table = ResTable} = S,
                           dict:store(ResType, NewOList, Table0)
                   end
           end, ResTable, OpList),
-    {S#sandbox_state{res_table = NewResTable}, ok}.
+    {S#sandbox_state{res_table = NewResTable}, ok};
+ctl_handle_call(#sandbox_state{opt = #sandbox_opt{fd_scheduler = FdSched, diffiso_port = Port}} = S,
+               _Where, ?cci_get_advice()) ->
+    case {FdSched, Port} of
+        {undefined, _} ->
+            ok;
+        {_, undefined} ->
+            case os:getenv("DIFFISO_ADVICE") of
+                false -> ok;
+                AdvStr ->
+                    Term = ?H:string_to_term(AdvStr),
+                    FdSched ! {hint, {set_guidance, Term}}
+            end;
+        _ ->
+            {ok, LSock} = gen_tcp:listen(0, [binary, {active, false}]),
+            {ok, LPort} = inet:port(LSock),
+            BinData = term_to_binary({get_advice, LPort}),
+            {ok, Sock} = gen_tcp:connect("localhost", Port, [binary, {packet, 0}]),
+            ok = gen_tcp:send(Sock, BinData),
+            ok = gen_tcp:close(Sock),
+            {ok, RSock} = gen_tcp:accept(LSock),
+            {ok, BinResp} = tcp_recv(RSock, []),
+            gen_tcp:close(RSock),
+            gen_tcp:close(LSock),
+            Resp = binary_to_term(BinResp),
+            %% No need to synchronize since the message ordering is guaranteed
+            FdSched ! {hint, {set_guidance, Resp}}
+    end,
+    {S, ok}.
 
 ctl_process_ets_on_exit(#sandbox_state{proc_shtable = ShTab} = S, Proc) ->
     {S1, HandledList} =
@@ -1797,22 +1828,54 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT} = S, Reason) ->
     ets:delete(MT),
     ets:delete(PT),
     ?INFO("ctl stop transient = ~p, lives = ~p, deads = ~p", [S#sandbox_state.transient_counter, Lives, Deads]),
-    #sandbox_state{opt = #sandbox_opt{fd_opts = FdOpts}} = S,
-    case FdOpts of
+    #sandbox_state{opt = #sandbox_opt{fd_opts = FdOpts, fd_scheduler = FdSched, diffiso_port = DiffisoPort}} = S,
+    FdSeedInfo =
+        case FdOpts of
+            undefined ->
+                undefined;
+            _ ->
+                _Info = fd_get_seed_info(FdSched),
+                firedrill:stop(),
+                _Info
+        end,
+    case DiffisoPort of
         undefined ->
             ok;
         _ ->
-            firedrill:stop()
+            diffiso_report(DiffisoPort, {FdSeedInfo, Reason})
     end,
     exit(Reason).
+
+fd_get_seed_info(FdSched) ->
+    Ref = make_ref(),
+    FdSched ! {hint, {get_seed_info, Ref, self()}},
+    receive
+        {Ref, Reply} ->
+            Reply
+    end.
+
+diffiso_report(Port, Data) ->
+    BinData = term_to_binary({report, Data}),
+    {ok, Sock} = gen_tcp:connect("localhost", Port, [binary]),
+    ok = gen_tcp:send(Sock, BinData),
+    ok = gen_tcp:close(Sock),
+    ok.
+
+tcp_recv(Sock, Bs) ->
+    case gen_tcp:recv(Sock, 0) of
+        {ok, B} ->
+            tcp_recv(Sock, [Bs, B]);
+        {error, closed} ->
+            {ok, list_to_binary(Bs)}
+    end.
 
 %% research code - message race detection
 
 -define(weight_race, 10).
 
-detect_req_race(S, Where, ?cci_send_msg(_, To, Msg), WaitingReqs) ->
+detect_req_race(S, Where, ?cci_send_msg(_, To, _Msg), WaitingReqs) ->
     dict:fold(
-      fun (_, {OWhere, _, ?cci_send_msg(_, OTo, OMsg)}, CurS)
+      fun (_, {OWhere, _, ?cci_send_msg(_, OTo, _OMsg)}, CurS)
             when OTo =:= To ->
               %% concurrent message sending to the same receiver
               %% ?INFO("Found message race between ~p and ~p~n", [Where, OWhere]),
@@ -2781,6 +2844,9 @@ handle_init(F, A, Aux) ->
                 [epmd_module] ->
                     %% HACK, skip epmd communication
                     {ok, [["morpheus_sandbox_mock_epmd_module"]]};
+                [nocookie] ->
+                    %% HACK, skip cookies
+                    {ok, [["true"]]};
                 _ ->
                     apply(init, F, A)
             end;

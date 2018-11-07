@@ -28,6 +28,7 @@
 -define(cci_resource_release(OpList), {resource_release, OpList}).
 -define(cci_is_process_alive(Proc), {is_process_alive, Proc}).
 -define(cci_unique_integer(), {unique_integer}).
+-define(cci_get_advice(), {get_advice}).
 
 -define(cc_node_created(Ctl, Where, Node),
         call_ctl(Ctl, Where, ?cci_node_created(Node))).
@@ -122,3 +123,6 @@
 
 -define(cc_unique_integer(Ctl, Where),
         call_ctl(Ctl, Where, ?cci_unique_integer())).
+
+-define(cc_get_advice(Ctl, Where),
+        call_ctl(Ctl, Where, ?cci_get_advice())).

@@ -1,6 +1,6 @@
 -module(morpheus_helper).
 
--export([take_nth/2, while/2, replace_pid/2]).
+-export([take_nth/2, while/2, replace_pid/2, string_to_term/1]).
 
 take_nth(N, List) ->
     take_nth(N, [], List).
@@ -16,6 +16,12 @@ while(State, Body) ->
         Other ->
             Other
     end.
+
+string_to_term(String) ->
+    {ok, Tokens, _EndLine} = erl_scan:string(String),
+    {ok, AbsForm} = erl_parse:parse_exprs(Tokens),
+    {value, Value, _Bs} = erl_eval:exprs(AbsForm, erl_eval:new_bindings()),
+    Value.
 
 replace_pid(Lst, F) when is_list(Lst) ->
     replace_pid_list([], Lst, F);
@@ -41,4 +47,3 @@ replace_pid_tuple(0, Tp, _) ->
     Tp;
 replace_pid_tuple(Pos, Tp, F) ->
     replace_pid_tuple(Pos - 1, setelement(Pos, Tp, replace_pid(element(Pos, Tp), F)), F).
-
