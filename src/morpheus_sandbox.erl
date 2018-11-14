@@ -107,47 +107,21 @@ ctl_state_format(S) ->
         waiting = dict:to_list(S#sandbox_state.waiting),
         res_table = dict:to_list(S#sandbox_state.res_table)
        },
-      fun (sandbox_opt, 13) ->
-              [ verbose_ctl_req
-              , verbose_handle
-              , trace_receive
-              , trace_send
-              , control_timeouts
-              , time_uncertainty
-              , stop_on_deadlock
-              , heartbeat
-              , aux_module
-              , undet_timeout
-              , fd_opts
-              , fd_scheduler
-              , et_collector
-              ];
-          (sandbox_state, 24) ->
-              [ opt
-              , initial
-              , mod_table
-              , proc_table
-              , proc_shtable
-              , res_table
-              , abs_id_table
-              , abs_id_counter
-              , transient_counter
-              , alive
-              , alive_counter
-              , buffer_counter
-              , buffer
-              , waiting_counter
-              , waiting
-              , vclock_offset
-              , vclock
-              , vclock_limit
-              , unique_integer
-              , timeouts_counter
-              , timeouts
-              , undet_signals
-              , undet_kick
-              , undet_nifs
-              ];
+      %% Must do case by case since record_info doesn't take variables
+      fun (sandbox_opt, Size) ->
+              case Size + 1 =:= record_info(size, sandbox_opt) of
+                  true ->
+                      record_info(fields, sandbox_opt);
+                  false ->
+                      no
+              end;
+          (sandbox_state, Size) ->
+              case Size + 1 =:= record_info(size, sandbox_state) of
+                  true ->
+                      record_info(fields, sandbox_state);
+                  false ->
+                      no
+              end;
           (_, _) -> no
       end).
 
