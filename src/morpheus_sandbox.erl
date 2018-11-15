@@ -440,7 +440,7 @@ ctl_loop(S0) ->
 
 fill_in_data(#sandbox_state{opt = #sandbox_opt{aux_module = Aux}}, Data, Req) ->
     case (erlang:function_exported(Aux, delay_level, 1) andalso
-          Aux:message_delay_level(Req)) of
+          Aux:delay_level(Req)) of
         false ->
             Data;
         L when is_integer(L) ->
