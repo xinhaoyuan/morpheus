@@ -370,7 +370,7 @@ ctl_loop(S0) ->
                                 true -> ?INFO("delay undet_barrier ~p", [Req]);
                                 false -> ok
                             end,
-                            ctl_loop(ctl_push_request_to_buffer(S, Where, Aid, Pid, Ref, {undet_barrier, true}));
+                            ctl_loop(ctl_push_request_to_buffer(S, #{where => Where}, Aid, Pid, Ref, {undet_barrier, true}));
                         {undet_barrier} ->
                             ctl_loop(ctl_loop_call(S, Where, ToTrace, Pid, Ref, {undet_barrier, false}));
                         {undet, _} ->
@@ -379,13 +379,13 @@ ctl_loop(S0) ->
                                 false -> ok
                             end,
                             Pid ! {Ref, ok},
-                            ctl_loop(ctl_push_request_to_buffer(S, Where, Aid, undet, Ref, Req));
+                            ctl_loop(ctl_push_request_to_buffer(S, #{where => Where}, Aid, undet, Ref, Req));
                         _ ->
                             case ToTrace of
                                 true -> ?INFO("delay resp ~p", [Req]);
                                 false -> ok
                             end,
-                            ctl_loop(ctl_push_request_to_buffer(S, Where, Aid, Pid, Ref, Req))
+                            ctl_loop(ctl_push_request_to_buffer(S, #{where => Where}, Aid, Pid, Ref, Req))
                     end;
                 error ->
                     ctl_loop(ctl_loop_call(S, Where, ToTrace, Pid, Ref, Req));
@@ -438,13 +438,25 @@ ctl_loop(S0) ->
             ctl_loop(S)
     end.
 
+fill_in_data(#sandbox_state{opt = #sandbox_opt{aux_module = Aux}}, Data, ?cci_send_msg(From, To, Msg) = Req) ->
+    case (erlang:function_exported(Aux, message_delay_level, 3) andalso
+          Aux:message_delay_level(From, To, Msg)) of 
+        false ->
+            Data;
+        L when is_integer(L) ->
+            ?INFO("Set delay level ~w to req ~w", [L, Req]),
+            Data#{delay_level => L}
+    end;
+fill_in_data(_, Data, _) ->
+    Data.
 
 ctl_push_request_to_buffer(
   #sandbox_state{ buffer_counter = BC
                 , buffer = Buffer
                 , waiting_counter = WC
                 , waiting = Waiting} = S,
-  Where, AID, ReplyTo, Ref, Req) ->
+  #{where := Where} = Data0, AID, ReplyTo, Ref, Req) ->
+    Data = fill_in_data(S, Data0, Req),
     NewWaiting = dict:store(Ref, {Where, ReplyTo, Req}, Waiting),
     NewBuffer = [{case ReplyTo of
                       undet -> -AID - 1;
@@ -455,7 +467,7 @@ ctl_push_request_to_buffer(
                                 from = self(),
                                 to = ctl_call_target(Req),
                                 type = ctl_call_target_type(Req),
-                                data = #{where => Where}
+                                data = Data
                                },
                   Req}
                  | Buffer],
@@ -1669,7 +1681,7 @@ ctl_handle_cast( #sandbox_state{ opt = #sandbox_opt{ time_uncertainty = TUC }
                            case dict:find(Proc, AIDT) of
                                {ok, Aid} ->
                                    ctl_push_request_to_buffer(
-                                     CurS, kick_timeout, Aid, timeout, make_ref(), {receive_timeout, Proc, Ref})
+                                     CurS, #{where => kick_timeout}, Aid, timeout, make_ref(), {receive_timeout, Proc, Ref})
                            end
                    end, S0, ToFire),
             S1
