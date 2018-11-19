@@ -686,7 +686,8 @@ ctl_call_to_delay(false, {delay}) -> true;
 ctl_call_to_delay(false, {delay, _}) -> true;
 ctl_call_to_delay(false, _) -> false.
 
-ctl_call_target(_) -> morpheus.
+ctl_call_target(?cci_send_msg(_From, To, _Msg)) -> To;
+ctl_call_target(_) -> global.
 
 ctl_call_target_type(_) -> morpheus_call.
 
@@ -1841,20 +1842,24 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT} = S, Reason) ->
     ets:delete(PT),
     ?INFO("ctl stop transient = ~p, lives = ~p, deads = ~p", [S#sandbox_state.transient_counter, Lives, Deads]),
     #sandbox_state{opt = #sandbox_opt{fd_opts = FdOpts, fd_scheduler = FdSched, diffiso_port = DiffisoPort}} = S,
-    FdSeedInfo =
-        case FdOpts of
-            undefined ->
-                undefined;
-            _ ->
-                _Info = fd_get_seed_info(FdSched),
-                firedrill:stop(),
-                _Info
-        end,
     case DiffisoPort of
         undefined ->
             ok;
         _ ->
+            FdSeedInfo =
+                case FdOpts of
+                    undefined ->
+                        undefined;
+                    _ ->
+                        fd_get_seed_info(FdSched)
+                end,
             diffiso_report(DiffisoPort, {FdSeedInfo, Reason})
+    end,
+    case FdOpts of
+        undefined ->
+            undefined;
+        _ ->
+            firedrill:stop()
     end,
     exit(Reason).
 
