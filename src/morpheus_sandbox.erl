@@ -206,6 +206,18 @@ ctl_trace_receive_real(_Opt, _SHT,
 -define(CATCH(EXP), ((fun () -> try {ok, EXP} catch error:R -> {error, R, erlang:get_stacktrace()}; exit:R -> {exit, R, erlang:get_stacktrace()}; throw:R -> {throw, R, erlang:get_stacktrace()} end end)())).
 -endif.
 
+get_from_opts_or_env(Name, Opts, EnvName, EnvParse) ->
+    case proplists:get_value(Name, Opts) of
+        undefined ->
+            case os:getenv(EnvName) of
+                false ->
+                    undefined;
+                E ->
+                    EnvParse(E)
+            end;
+        V -> V
+    end.
+
 ctl_init(Opts) ->
     process_flag(trap_exit, true),
     ensure_preloaded_path(),
@@ -245,7 +257,7 @@ ctl_init(Opts) ->
           , fd_opts               = FdOpts
           , fd_scheduler          = FdSched
           , et_collector          = proplists:get_value(et_collector, Opts, undefined)
-          , diffiso_port          = proplists:get_value(diffiso_port, Opts, undefined)
+          , diffiso_port          = get_from_opts_or_env(diffiso_port, Opts, "DIFFISO_PORT", fun list_to_integer/1)
           }
         , initial = true
         , mod_table = ?TABLE_NEW()
