@@ -1846,6 +1846,7 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT} = S, Reason) ->
         undefined ->
             ok;
         _ ->
+            ?INFO("report to diffiso~n", []),
             FdSeedInfo =
                 case FdOpts of
                     undefined ->
