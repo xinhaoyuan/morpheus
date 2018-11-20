@@ -213,7 +213,6 @@ get_from_opts_or_env(Name, Opts, EnvName, EnvParse) ->
                 false ->
                     undefined;
                 E ->
-                    io:format(user, "get option ~s from env var ~s: ~s~n", [Name, EnvName, EnvParse]),
                     EnvParse(E)
             end;
         V -> V
