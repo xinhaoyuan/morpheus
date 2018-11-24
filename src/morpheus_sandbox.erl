@@ -356,11 +356,11 @@ ctl_check_heartbeat(#sandbox_state{opt = #sandbox_opt{heartbeat = once}} = S) ->
 ctl_check_heartbeat(_) ->
     ok.
 
-ctl_loop_et_trace(#sandbox_state{opt = #sandbox_opt{et_handle = undefined}} = S, _) -> S;
-ctl_loop_et_trace(#sandbox_state{opt = #sandbox_opt{et_handle = ETHandle} = Opt} = S, {call, Where, Pid, _Ref, Req}) ->
+ctl_call_et_trace(#sandbox_state{opt = #sandbox_opt{et_handle = undefined}} = S, _From, _Where, _Req) -> S;
+ctl_call_et_trace(#sandbox_state{opt = #sandbox_opt{et_handle = ETHandle} = Opt} = S, From, Where, Req) ->
     H1 =
         try
-            {ok, Cont} = et_collector:report_event(ETHandle, 50, Pid, Where, Req),
+            {ok, Cont} = et_collector:report_event(ETHandle, 50, From, Where, Req),
             Cont
         catch
             exit:Reason ->
@@ -371,12 +371,11 @@ ctl_loop_et_trace(#sandbox_state{opt = #sandbox_opt{et_handle = ETHandle} = Opt}
         true -> S;
         false -> S#sandbox_state{opt = Opt#sandbox_opt{et_handle = H1}}
     end;
-ctl_loop_et_trace(S, _) ->
+ctl_call_et_trace(S, _, _, _) ->
      S.
 
 ctl_loop(S0) ->
-    {S1, M} = ctl_check_and_receive(S0),
-    S = ctl_loop_et_trace(S1, M),
+    {S, M} = ctl_check_and_receive(S0),
     #sandbox_state{opt = Opt, initial = Initial, abs_id_table = AIDT} = S,
     #sandbox_opt{verbose_ctl_req = Verbose} = Opt,
     ToTrace =
@@ -722,8 +721,9 @@ ctl_call_target(_) -> global.
 
 ctl_call_target_type(_) -> morpheus_call.
 
-ctl_loop_call(S, Where, ToTrace,
+ctl_loop_call(S0, Where, ToTrace,
               ReplyTo, Ref, Req) ->
+    S = ctl_call_et_trace(S0, ReplyTo, Where, Req),
     case ToTrace of
         true ->
             ?INFO("ctl req from ~w@~p:~n  ~p", [ReplyTo, Where, Req]);
