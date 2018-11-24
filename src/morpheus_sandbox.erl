@@ -68,7 +68,7 @@
         , undet_timeout         :: integer()
         , fd_opts               :: term()
         , fd_scheduler          :: pid()
-        , et_collector          :: pid()
+        , et_handle             :: term()
         , diffiso_port          :: undefined | integer()
         }).
 -record(timeout_entry,
@@ -256,7 +256,7 @@ ctl_init(Opts) ->
           , undet_timeout         = proplists:get_value(undet_timeout, Opts, 50)
           , fd_opts               = FdOpts
           , fd_scheduler          = FdSched
-          , et_collector          = proplists:get_value(et_collector, Opts, undefined)
+          , et_handle             = proplists:get_value(et_handle, Opts, undefined)
           , diffiso_port          = get_from_opts_or_env(diffiso_port, Opts, "DIFFISO_PORT", fun list_to_integer/1)
           }
         , initial = true
@@ -356,8 +356,27 @@ ctl_check_heartbeat(#sandbox_state{opt = #sandbox_opt{heartbeat = once}} = S) ->
 ctl_check_heartbeat(_) ->
     ok.
 
+ctl_loop_et_trace(#sandbox_state{opt = #sandbox_opt{et_handle = undefined}} = S, _) -> S;
+ctl_loop_et_trace(#sandbox_state{opt = #sandbox_opt{et_handle = ETHandle} = Opt} = S, {call, Where, Pid, _Ref, Req}) ->
+    H1 =
+        try
+            {ok, Cont} = et_collector:report_event(ETHandle, 50, Pid, Where, Req),
+            Cont
+        catch
+            exit:Reason ->
+                ?ERROR("got exit(~p) while report to et, stop reporting", [Reason]),
+                undefined
+        end,
+    case H1 =:= ETHandle of
+        true -> S;
+        false -> S#sandbox_state{opt = Opt#sandbox_opt{et_handle = H1}}
+    end;
+ctl_loop_et_trace(S, _) ->
+     S.
+
 ctl_loop(S0) ->
-    {S, M} = ctl_check_and_receive(S0),
+    {S1, M} = ctl_check_and_receive(S0),
+    S = ctl_loop_et_trace(S1, M),
     #sandbox_state{opt = Opt, initial = Initial, abs_id_table = AIDT} = S,
     #sandbox_opt{verbose_ctl_req = Verbose} = Opt,
     ToTrace =
