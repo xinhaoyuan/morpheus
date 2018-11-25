@@ -357,9 +357,9 @@ ctl_check_heartbeat(_) ->
     ok.
 
 ctl_call_et_trace(#sandbox_state{opt = #sandbox_opt{trace_tab = undefined}} = S, _From, _Where, _Req) -> S;
-ctl_call_et_trace(#sandbox_state{opt = #sandbox_opt{trace_tab = Tab} = Opt} = S, From, Where, Req) ->
+ctl_call_et_trace(#sandbox_state{opt = #sandbox_opt{trace_tab = Tab}} = S, From, Where, Req) ->
     TC = ets:update_counter(Tab, trace_counter, 1),
-    ets:insert(Tab, {TC, morpheus_call, From, Where, Req}),
+    ets:insert(Tab, {TC, morpheus_call, {From, Where, Req}}),
     S;
 ctl_call_et_trace(S, _, _, _) ->
      S.
