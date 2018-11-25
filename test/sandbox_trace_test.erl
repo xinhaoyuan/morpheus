@@ -1,4 +1,4 @@
--module(sandbox_et_test).
+-module(sandbox_trace_test).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -10,18 +10,17 @@ all_test_() ->
     ].
 
 t_basic() ->
-    {ok, Collector} = et_collector:start_link([]),
+    Tab = ets:new(trace_tab, [ordered_set, public, {write_concurrency, true}]),
+    ets:insert(Tab, {trace_counter, 0}),
     {Ctl, MRef} = morpheus_sandbox:start(?MODULE, basic_test_entry, [],
                                          [ monitor
-                                         , {et_handle, Collector}
+                                         , {trace_tab, Tab}
                                          ]),
     success = receive {'DOWN', MRef, _, _, Reason} -> Reason end,
-    et_collector:iterate( Collector, first, infinity
-                        , fun (E, Acc) ->
-                                  io:format(user, "~p~n", [E])
-                          end
-                        , undefined),
-    %% ok = et_collector:stop(Collector),
+    ets:foldl(fun (E, Acc) ->
+                      io:format(user, "~p~n", [E]),
+                      Acc
+              end, undefined, Tab),
     ok.
 
 basic_test_entry() ->
