@@ -140,15 +140,26 @@ sht_abs_id(SHT, Proc) ->
             Proc
     end.
 
-ctl_trace_send(#sandbox_opt{aux_module = Aux} = Opt, SHT,
+ctl_trace_send(#sandbox_opt{trace_send = Trace, aux_module = Aux, trace_tab = Tab} = Opt, SHT,
                Where, From, To, Type, Content, Effect) ->
-    case Aux =:= undefined
-        orelse not erlang:function_exported(Aux, trace_send_filter, 4)
-        orelse Aux:trace_send_filter(From, To, Type, Content) of
-        true ->
-            ctl_trace_send_real(Opt, SHT, Where, From, To, Type, Content, Effect);
+    case {Trace, ?SHTABLE_GET(SHT, tracing)} of
+        {true, {_, true}} ->
+            case Aux =:= undefined
+                orelse not erlang:function_exported(Aux, trace_send_filter, 4)
+                orelse Aux:trace_send_filter(From, To, Type, Content) of
+                true ->
+                    ctl_trace_send_real(Opt, SHT, Where, From, To, Type, Content, Effect);
+                _ ->
+                    ok
+            end;
+        _ -> ok
+    end,
+    case Tab of
+        undefined ->
+            ok;
         _ ->
-            ok
+            TC = ets:update_counter(Tab, trace_counter, 1),
+            ets:insert(Tab, {TC, morpheus_send, {Where, From, To, Type, Content, Effect}})
     end.
 
 ctl_trace_send_real(_Opt, _SHT,
@@ -158,15 +169,26 @@ ctl_trace_send_real(_Opt, _SHT,
                     Where, From, To, signal, Reason, _Effect) ->
     ?INFO("~w@~p -!-> ~w signal:~n  ~p", [From, Where, To, Reason]).
 
-ctl_trace_receive(#sandbox_opt{aux_module = Aux} = Opt, SHT,
+ctl_trace_receive(#sandbox_opt{trace_receive = Trace, aux_module = Aux, trace_tab = Tab} = Opt, SHT,
                   Where, To, Type, Content) ->
-    case Aux =:= undefined
-        orelse not erlang:function_exported(Aux, trace_receive_filter, 3)
-        orelse Aux:trace_receive_filter(To, Type, Content) of
-        true ->
-            ctl_trace_receive_real(Opt, SHT, Where, To, Type, Content);
+    case {Trace, ?SHTABLE_GET(SHT, tracing)} of
+        {true, {_, true}} ->
+            case Aux =:= undefined
+                orelse not erlang:function_exported(Aux, trace_receive_filter, 3)
+                orelse Aux:trace_receive_filter(To, Type, Content) of
+                true ->
+                    ctl_trace_receive_real(Opt, SHT, Where, To, Type, Content);
+                _ ->
+                    ok
+            end;
+        _ -> ok
+    end,
+    case Tab of
+        undefined ->
+            ok;
         _ ->
-            ok
+            TC = ets:update_counter(Tab, trace_counter, 1),
+            ets:insert(Tab, {TC, morpheus_receive, {Where, To, Type, Content}})
     end.
 
 ctl_trace_receive_real(_Opt, _SHT,
@@ -175,6 +197,24 @@ ctl_trace_receive_real(_Opt, _SHT,
 ctl_trace_receive_real(_Opt, _SHT,
                        Where, Proc, Type, undefined) ->
     ?INFO("~w@~p <-!-:~n  ~p", [Proc, Where, Type]).
+
+ctl_trace_new_process(#sandbox_opt{trace_send = TSend, trace_receive = TRecv, trace_tab = Tab}, SHT, Proc) ->
+    case TSend orelse TRecv orelse (Tab =/= undefined) of
+        true ->
+            {_, AbsId} = ?SHTABLE_GET(SHT, {abs_id, Proc}),
+            case TSend orelse TRecv of
+                true->
+                    ?INFO("~w created: ~w", [Proc, AbsId]);
+                _ -> ok
+            end,
+            case Tab of
+                undefined -> ok;
+                _ ->
+                    TC = ets:update_counter(Tab, trace_counter, 1),
+                    ets:insert(Tab, {TC, morpheus_new_process, {Proc, AbsId}})
+            end;
+        _ -> ok
+    end.
 
 %% Currently, proc_table contains the following kinds of entries:
 %% {proc, PID} -> {alive, dict:dict()} | {tomb, Node}
@@ -944,15 +984,7 @@ ctl_handle_call(#sandbox_state
             ?ERROR("instrumented_process_created happened twice", []),
             {S, badarg};
         {undefined, {_, {Status, _}}} when Status =:= offline; Status =:= online ->
-            if
-                Opt#sandbox_opt.trace_send; Opt#sandbox_opt.trace_receive ->
-                    %% Do not hide this message
-                    case ?SHTABLE_GET(SHT, {abs_id, Proc}) of
-                        {_, AbsId} ->
-                            ?INFO("~w created: ~w", [Proc, AbsId])
-                    end;
-                true -> ok
-            end,
+            ctl_trace_new_process(Opt, SHT, Proc),
             erlang:link(Proc),
             PT0 = ?TABLE_SET(PT,  {proc, Proc}, {alive, dict:new()}),
             PT1 = ?TABLE_SET(PT0, {name, Proc}, {Node, []}),
@@ -1718,7 +1750,7 @@ ctl_handle_cast(#sandbox_state{undet_signals = _UndetSigs, undet_kick = KickRef}
     end.
 
 ctl_process_send( #sandbox_state
-                  { opt = #sandbox_opt{trace_send = Verbose} = Opt
+                  { opt = Opt
                   , proc_table = PT
                   , proc_shtable = SHT
                   , alive_counter = AC} = S
@@ -1771,33 +1803,16 @@ ctl_process_send( #sandbox_state
                         end
                 end
         end,
-    case Verbose of
-        true ->
-            case ?SHTABLE_GET(SHT, tracing) of
-                {_, true} ->
-                    ctl_trace_send(Opt, SHT, Where, From, Proc, message, Msg, I);
-                _ ->
-                    ok
-            end;
-        false -> ok
-    end,
+    ctl_trace_send(Opt, SHT, Where, From, Proc, message, Msg, I),
     {S0, R}.
 
 ctl_process_send_signal( #sandbox_state
-                         { opt = #sandbox_opt{trace_send = Verbose} = Opt
+                         { opt = Opt
                          , proc_table = PT
                          , proc_shtable = SHT
                          , alive_counter = AC} = S
                        , Where, From, Proc, Reason) ->
-    case Verbose of
-        true ->
-            case ?SHTABLE_GET(SHT, tracing) of
-                {_, true} ->
-                    ctl_trace_send(Opt, SHT, Where, From, Proc, signal, Reason, sent);
-                _ -> ok
-            end;
-        false -> ok
-    end,
+    ctl_trace_send(Opt, SHT, Where, From, Proc, signal, Reason, sent),
     ?SHTABLE_SET(SHT, {exit, Proc}, Reason),
     case ?TABLE_GET(PT, {msg_queue, Proc}) of
         undefined ->
@@ -2102,35 +2117,14 @@ handle(Old, New, Tag, Args, Ann) ->
             end,
             {ok, Ref} = ?cc_process_receive(Ctl, Ann, self(), PatFun, Timeout),
             R = handle_receive(Ctl, Ann, Ref),
-            #sandbox_opt{trace_receive = TraceReceive} = Opt,
-            ToTrace =
-                case TraceReceive of
-                    true ->
-                        case ?SHTABLE_GET(get_shtab(), tracing) of
-                            {_, true} ->
-                                true;
-                            _ ->
-                                false
-                        end;
-                    false ->
-                        false
-                end,
             case R of
                 signal ->
                     handle_signals(Ann);
                 timeout ->
-                    case ToTrace of
-                        true ->
-                            ctl_trace_receive(Opt, get_shtab(), Ann, self(), timeout, undefined);
-                        _ -> ok
-                    end,
+                    ctl_trace_receive(Opt, get_shtab(), Ann, self(), timeout, undefined),
                     timeout;
                 [message | Msg] ->
-                    case ToTrace of
-                        true ->
-                            ctl_trace_receive(Opt, get_shtab(), Ann, self(), message, Msg);
-                        _ -> ok
-                    end,
+                    ctl_trace_receive(Opt, get_shtab(), Ann, self(), message, Msg),
                     R
             end
     end.
@@ -2181,16 +2175,8 @@ handle_signals(Where) ->
         undefined ->
             ok;
         {_, Reason} ->
-            Opt = #sandbox_opt{trace_receive = Verbose} = get_opt(),
-            case Verbose of
-                true ->
-                    case ?SHTABLE_GET(ShTab, tracing) of
-                        {_, true} ->
-                            ctl_trace_receive(Opt, get_shtab(), [], self(), signal, undefined);
-                        _ -> ok
-                    end;
-                _ -> ok
-            end,
+            Opt = get_opt(),
+            ctl_trace_receive(Opt, get_shtab(), [], self(), signal, undefined),
             before_tomb(),
             %% cannot throw exit since it may be caught by the guest ...
             ?DEBUG("~p get exit signal ~p", [self(), Reason]),
