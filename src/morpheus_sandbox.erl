@@ -68,7 +68,7 @@
         , undet_timeout         :: integer()
         , fd_opts               :: term()
         , fd_scheduler          :: pid()
-        , trace_tab             :: term()
+        , trace_tab             :: undefined | ets:tid()
         , diffiso_port          :: undefined | integer()
         }).
 -record(timeout_entry,
