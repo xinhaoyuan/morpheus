@@ -63,6 +63,7 @@
         , control_timeouts      :: boolean()
         , time_uncertainty      :: integer()
         , stop_on_deadlock      :: boolean()
+        , scoped_weight         :: boolean()
         , heartbeat             :: false | once | integer()
         , aux_module            :: undefined | module()
         , undet_timeout         :: integer()
@@ -237,8 +238,9 @@ ctl_trace_new_process(#sandbox_opt{trace_send = TSend, trace_receive = TRecv, tr
 %% proc_shtable stores shared but transient data for communication
 %% between sandboxed processes and ctl:
 %% {exit, PID} -> Reason - exit signal
-%% {ets, RealEtsRef} -> {VirtualEtsRef, Owner, HeirInfo} - set before a sandbox process give ets control to sandbox ctl 
+%% {ets, RealEtsRef} -> {VirtualEtsRef, Owner, HeirInfo} - set before a sandbox process give ets control to sandbox ctl
 %% {abs_id, PID} -> [Node, PList] - shared mapping of abstract id of process
+%% {scoped_weight, PID} -> Weight
 
 -ifdef(OTP_RELEASE).
 -define(CATCH(EXP), ((fun () -> try {ok, EXP} catch error:R:ST -> {error, R, ST}; exit:R:ST -> {exit, R, ST}; throw:R:ST -> {throw, R, ST} end end)())).
@@ -291,6 +293,7 @@ ctl_init(Opts) ->
           , control_timeouts      = proplists:get_value(control_timeouts, Opts, true)
           , time_uncertainty      = proplists:get_value(time_uncertainty, Opts, 0)
           , stop_on_deadlock      = proplists:get_value(stop_on_deadlock, Opts, true)
+          , scoped_weight         = proplists:get_value(scoped_weight, Opts, false)
           , heartbeat             = proplists:get_value(heartbeat, Opts, 10000)
           , aux_module            = proplists:get_value(aux_module, Opts, undefined)
           , undet_timeout         = proplists:get_value(undet_timeout, Opts, 50)
@@ -498,16 +501,19 @@ ctl_loop(S0) ->
             ctl_loop(S)
     end.
 
-fill_in_data(#sandbox_state{opt = #sandbox_opt{aux_module = Aux}}, Data, Req) ->
-    case (erlang:function_exported(Aux, delay_level, 1) andalso
-          Aux:delay_level(Req)) of
-        false ->
-            Data;
-        L when is_integer(L) ->
-            ?INFO("Set delay level ~w to req ~w", [L, Req]),
-            Data#{delay_level => L}
-    end;
-fill_in_data(_, Data, _) ->
+fill_in_data(#sandbox_state{opt = #sandbox_opt{aux_module = Aux}}, Data, From, Req) ->
+    D1 =
+        case (erlang:function_exported(Aux, delay_level, 1) andalso
+              Aux:delay_level(Req)) of
+            false ->
+                Data;
+            L when is_integer(L) ->
+                %% ?INFO("Set delay level ~w to req ~w", [L, Req]),
+                Data#{delay_level => L}
+        end,
+    D2 = D1#{from => From},
+    D2;
+fill_in_data(_, Data, _, _) ->
     Data.
 
 ctl_push_request_to_buffer(
@@ -516,7 +522,7 @@ ctl_push_request_to_buffer(
                 , waiting_counter = WC
                 , waiting = Waiting} = S,
   #{where := Where} = Data0, AID, ReplyTo, Ref, Req) ->
-    Data = fill_in_data(S, Data0, Req),
+    Data = fill_in_data(S, Data0, ReplyTo, Req),
     NewWaiting = dict:store(Ref, {Where, ReplyTo, Req}, Waiting),
     NewBuffer = [{case ReplyTo of
                       undet -> -AID - 1;
@@ -589,21 +595,31 @@ ctl_push_request_to_scheduler(#sandbox_state{ opt = #sandbox_opt{fd_scheduler = 
                                             , proc_shtable = SHT
                                             , weight_table = WT} = S,
                               Req) when Sched =/= undefined ->
-    #fd_delay_req{data = #{where := Where} = Data} = Req,
-    Weight = case ?SHTABLE_GET(SHT, race_weighted) of
-                 {_, true} ->
-                     case dict:find(Where, WT) of
-                         {ok, W} ->
-                             %% ?INFO("Delay req ~p with weight ~p", [Req, W]),
-                             W;
-                         error ->
-                             %% ?INFO("Delay req ~p without weight", [Req]),
-                             1
-                     end;
-                 _ ->
-                     1
-             end,
-    Sched ! Req#fd_delay_req{data = Data#{weight => Weight}},
+    #fd_delay_req{data = #{where := Where, from := From} = Data} = Req,
+    Data1 =
+        case is_pid(From) andalso ?SHTABLE_GET(SHT, {scoped_weight, From}) of
+            {_, W} ->
+                %% ?INFO("Set delay level to ~p from ~p", [W, From]),
+                ?SHTABLE_REMOVE(SHT, {scoped_weight, From}),
+                Data#{delay_level => W};
+            _ ->
+                Weight =
+                    case ?SHTABLE_GET(SHT, race_weighted) of
+                        {_, true} ->
+                            case dict:find(Where, WT) of
+                                {ok, W} ->
+                                    %% ?INFO("Delay req ~p with weight ~p", [Req, W]),
+                                    W;
+                                error ->
+                                    %% ?INFO("Delay req ~p without weight", [Req]),
+                                    1
+                            end;
+                        _ ->
+                            1
+                    end,
+                Data#{weight => Weight}
+        end,
+    Sched ! Req#fd_delay_req{data = Data1},
     S.
 
 ctl_notify_scheduler(#sandbox_state{opt = #sandbox_opt{fd_scheduler = Sched}} = S)
@@ -1977,8 +1993,10 @@ to_expose(_, _, _, _) ->
 
 handle(Old, New, Tag, Args, Ann) ->
     handle_signals(Ann),
-    #sandbox_opt{verbose_handle = Verbose, aux_module = Aux} =
-        Opt = get_opt(),
+    #sandbox_opt{ verbose_handle = Verbose
+                , aux_module = Aux
+                , scoped_weight = ScopedWeight
+                } = Opt = get_opt(),
     case Verbose of
         true ->
             case ?SHTABLE_GET(get_shtab(), tracing) of
@@ -1988,6 +2006,24 @@ handle(Old, New, Tag, Args, Ann) ->
                     ok
             end;
         _ -> ok
+    end,
+    case ScopedWeight
+        andalso Aux =/= undefined
+        andalso erlang:function_exported(Aux, is_scoped, 1) of
+        true ->
+            case Aux:is_scoped(Old) of
+                true ->
+                    case ?SHTABLE_GET(get_shtab(), {scoped_weight, self()}) of
+                        {_, _} ->
+                            ok;
+                        _ ->
+                            ?SHTABLE_SET(get_shtab(), {scoped_weight, self()}, 1)
+                    end;
+                false ->
+                    ok
+            end;
+        false ->
+            ok
     end,
     case Aux =/= undefined
         andalso erlang:function_exported(Aux, to_delay_call, 4)
