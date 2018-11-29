@@ -10,6 +10,7 @@
         , get_code_path/0
         , get_kernel_app/0
         , raw_apply/3
+        , log/1
         ]).
 
 call_ctl(Args) ->
@@ -54,3 +55,6 @@ get_kernel_app() ->
 
 raw_apply(M, F, A) ->
     erlang:apply(M, F, A).
+
+log(L) ->
+    morpheus_sandbox:call_ctl(morpheus_sandbox:get_ctl(), undefined, {nodelay, {log, L}}).

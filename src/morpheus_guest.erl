@@ -10,6 +10,7 @@
         , get_code_path/0
         , get_kernel_app/0
         , raw_apply/3
+        , log/1
         ]).
 
 call_ctl(_Args) ->
@@ -40,4 +41,7 @@ get_kernel_app() ->
     error(not_in_sandbox).
 
 raw_apply(_M, _F, _A) ->
+    error(not_in_sandbox).
+
+log(_L) ->
     error(not_in_sandbox).
