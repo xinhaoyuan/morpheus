@@ -797,7 +797,8 @@ ctl_handle_call(S, Where, {delay, Req}) ->
     ctl_handle_call(S, Where, Req);
 ctl_handle_call(S, Where, {maybe_delay, Req}) ->
     ctl_handle_call(S, Where, Req);
-ctl_handle_call(S, _Where, {log, _}) ->
+ctl_handle_call(S, _Where, {log, L}) ->
+    ?INFO("Log: ~p", [L]),
     {S, ok};
 ctl_handle_call(S, _Where, ?cci_initial_kick()) ->
     {S#sandbox_state{initial = false}, ok};

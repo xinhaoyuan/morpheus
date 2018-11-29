@@ -22,4 +22,5 @@ t_basic() ->
 
 basic_test_entry() ->
     io:format("hello from ~p~n", [morpheus_guest:get_node()]),
+    morpheus_guest:log(log_test),
     ok.
