@@ -797,8 +797,8 @@ ctl_handle_call(S, Where, {delay, Req}) ->
     ctl_handle_call(S, Where, Req);
 ctl_handle_call(S, Where, {maybe_delay, Req}) ->
     ctl_handle_call(S, Where, Req);
-ctl_handle_call(S, _Where, {log, L}) ->
-    ?INFO("Log: ~p", [L]),
+ctl_handle_call(S, _Where, {log, _L}) ->
+    %% ?INFO("Log: ~p", [_L]),
     {S, ok};
 ctl_handle_call(S, _Where, ?cci_initial_kick()) ->
     {S#sandbox_state{initial = false}, ok};
@@ -2114,8 +2114,9 @@ handle(Old, New, Tag, Args, Ann) ->
             {ok, true} = ?cc_register_external_process(get_ctl(), Ann, get_node(), user, RealUser),
             RealUser;
         {call, [logger_simple_h, changing_config, _A]} ->
+            [_OldConfig, NewConfig] = _A,
             %% HACK - changing_config does not exist in logger_simple_h, but will be called in bootstrap process - just to workaround it.
-            ok;
+            {ok, NewConfig};
         {call, [net_kernel, monitor_nodes, _A]} ->
             %% HACK - we do not really emulate nodeup and nodedown events
             ok;
