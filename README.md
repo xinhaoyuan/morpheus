@@ -113,6 +113,8 @@ Limitations
 
    Node failures can be (hopefully) simulated by killing/resetting applications on nodes.
 
+ - Modules created in runtime are not supported yet. (e.g. lager doesn't work in sandbox)
+
 Generally speaking, complete sandboxing is tricky and costly.
 There are potentially other holes that change application behaviors unexpectedly and produce false positives.
 This often happens due to bad failure handling of simulated API that we mis-interpreted.

@@ -47,7 +47,9 @@ load_module_from_core(Name, Filename, Core) ->
             {ok, _, _Binary} ->
                 _Binary;
             _Other ->
-                ?WARNING("compile failed on module ~p: ~p", [Name, _Other]),
+                ?WARNING("compile failed on module ~p:~n"
+                         "  info: ~p~n"
+                        ,[Name, _Other]),
                 error(load_module_failed)
         end,
     {module, Name} = code:load_binary(Name, Filename, Binary),
@@ -171,7 +173,8 @@ instrument_core_tree(Tree, {{CtlMod, OriginalModule, NewModule} = Opt, CtlState,
                                       false ->
                                           ToExposeL0
                                   end,
-                              case erlang:function_exported(CtlMod, to_override, 4)
+                              case N =/= {on_load, 0}
+                                  andalso erlang:function_exported(CtlMod, to_override, 4)
                                   andalso CtlMod:to_override(CtlState, OriginalModule, F, A) of
                                   {true, Action}
                                     when Action =:= trace; Action =:= callback ->
@@ -198,6 +201,9 @@ instrument_core_tree(Tree, {{CtlMod, OriginalModule, NewModule} = Opt, CtlState,
                                               {NifsL, [OrigNT | ToExposeL], 
                                                [{NT, OverridedDef}, {cerl:c_var(OrigNT), DT} | DefsL]}
                                       end;
+                                  false when N =:= {on_load, 0} ->
+                                      ?INFO("ignored on_load/0", []),
+                                      {NifsL, ToExposeL, DefsL};
                                   false when IsNifStub ->
                                       UpdatedDef =
                                           case CtlMod:is_undet_nif(CtlState, OriginalModule, F, A) of
@@ -217,11 +223,14 @@ instrument_core_tree(Tree, {{CtlMod, OriginalModule, NewModule} = Opt, CtlState,
                                       {NifsL, ToExposeL, [{NT, DT} | DefsL]}
                               end
                       end, {[], [], []}, cerl:module_defs(Tree)),
+                NewExports = lists:usort(cerl:module_exports(Tree) ++
+                                              lists:foldr(fun (VN, Acc) -> [cerl:c_var(VN) | Acc] end, [], ToExpose))
+                    -- [cerl:c_var({on_load, 0})]
+                    ,
                 {cerl:update_c_module(
                    Tree,
                    cerl:c_atom(NewModule),
-                   cerl:module_exports(Tree) ++
-                       lists:foldr(fun (VN, Acc) -> [cerl:c_var(VN) | Acc] end, [], ToExpose),
+                   NewExports,
                    NewAttrs,
                    DefsWithForwarding),
                  CtlState, IS#ins_state{nifs = Nifs}};
@@ -377,6 +386,8 @@ whitelist_func(string, _, _) -> true;
 whitelist_func(unicode, _, _) -> true;
 whitelist_func(crypto, _, _) -> true;
 whitelist_func(io_lib, _, _) -> true;
+%% XXX could not instrument zlib properly - seems nif stub related
+whitelist_func(zlib, _, _) -> true;
 whitelist_func(filename, _, _) -> true;
 whitelist_func(erl_internal, _, _) ->true;
 whitelist_func(erl_parse, _, _) -> true;

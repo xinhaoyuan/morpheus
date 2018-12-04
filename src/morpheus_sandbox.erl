@@ -2092,6 +2092,9 @@ handle(Old, New, Tag, Args, Ann) ->
                     ?WARNING("Unhandled apply fun ~p info ~p", [F, Other]),
                     error(apply_bad_fun)
             end;
+        {call, [code, load_binary, A]} ->
+            ?WARNING("~w called unsupported function code:load_binary", [Old]),
+            {error, unsupported};
         {call, [erlang, F, A]} ->
             handle_erlang(F, A, {Old, New, Ann});
         {call, [init, F, A]} ->
@@ -3070,7 +3073,14 @@ handle_ets(F, A, {_Old, _New, Ann}) ->
                     Result = apply(ets, F, [RealTid | Rest]),
                     if
                         F =:= setopts ->
-                            [Opts] = Rest,
+                            Opts =
+                                case Rest of
+                                    [L] when is_list(L) ->
+                                        L;
+                                    [T] when is_tuple(T) ->
+                                        %% Opts could just be single opt tuple ...
+                                        [T]
+                                end,
                             case lists:keysearch(heir, 1, Opts) of
                                 false -> ok;
                                 {value, {heir, none}} ->
