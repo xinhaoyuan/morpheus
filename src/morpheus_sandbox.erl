@@ -60,6 +60,7 @@
         , verbose_handle        :: boolean()
         , trace_receive         :: boolean()
         , trace_send            :: boolean()
+        , only_schedule_send    :: boolean()
         , control_timeouts      :: boolean()
         , time_uncertainty      :: integer()
         , stop_on_deadlock      :: boolean()
@@ -290,6 +291,7 @@ ctl_init(Opts) ->
           , verbose_handle        = proplists:get_value(verbose_handle, Opts, false)
           , trace_receive         = proplists:get_value(trace_receive, Opts, false)
           , trace_send            = proplists:get_value(trace_send, Opts, false)
+          , only_schedule_send    = proplists:get_value(only_schedule_send, Opts, false)
           , control_timeouts      = proplists:get_value(control_timeouts, Opts, true)
           , time_uncertainty      = proplists:get_value(time_uncertainty, Opts, 0)
           , stop_on_deadlock      = proplists:get_value(stop_on_deadlock, Opts, true)
@@ -660,7 +662,7 @@ ctl_check_and_receive(#sandbox_state{opt = Opt,
                     BC > 0 ->
                         %% Flush the buffer and handle them deterministically
                         #sandbox_state{buffer = Buffer} = S,
-                        #sandbox_opt{fd_scheduler = Sched, aux_module = Aux} = Opt,
+                        #sandbox_opt{fd_scheduler = Sched, aux_module = Aux, only_schedule_send = OnlySend} = Opt,
                         SortedBuffer = lists:keysort(1, Buffer),
                         {S1, _, ToNotify} =
                             lists:foldl(
@@ -670,11 +672,14 @@ ctl_check_and_receive(#sandbox_state{opt = Opt,
                                               ?ERROR("Buffered requests with the same AID. This may lead to non-determinism", []);
                                           _ -> ok
                                       end,
-                                      case (Sched =/= undefined) andalso
-                                          ctl_call_to_delay(
-                                            Aux =:= undefined orelse
-                                            not erlang:function_exported(Aux, to_delay_call, 4),
-                                            OriginReq) of
+                                      ToSchedule =
+                                          Sched =/= undefined
+                                          andalso (not OnlySend orelse is_send_req(OriginReq))
+                                          andalso ctl_call_to_delay(
+                                                    Aux =:= undefined orelse
+                                                    not erlang:function_exported(Aux, to_delay_call, 4),
+                                                    OriginReq),
+                                      case ToSchedule of
                                           true ->
                                               {ctl_push_request_to_scheduler(CurS, DelayReq), AID, ToNotify};
                                           false ->
@@ -740,6 +745,10 @@ ctl_call_can_buffer(?cci_get_advice()) -> false;
 ctl_call_can_buffer({undet}) -> false;
 %% {undet, _} is delayable since we need to buffer it
 ctl_call_can_buffer(_) -> true.
+
+is_send_req(?cci_send_msg(_, _, _)) -> true;
+is_send_req(?cci_send_signal(_, _, _)) -> true;
+is_send_req(_) -> false.
 
 ctl_call_to_delay(true, {nodelay, _}) -> false;
 ctl_call_to_delay(true, ?cci_undet()) -> false;
@@ -2092,7 +2101,7 @@ handle(Old, New, Tag, Args, Ann) ->
                     ?WARNING("Unhandled apply fun ~p info ~p", [F, Other]),
                     error(apply_bad_fun)
             end;
-        {call, [code, load_binary, A]} ->
+        {call, [code, load_binary, _A]} ->
             ?WARNING("~w called unsupported function code:load_binary", [Old]),
             {error, unsupported};
         {call, [erlang, F, A]} ->
@@ -2393,7 +2402,8 @@ handle_erlang(send, [Name, Msg | Opts], {_Old, _New, Ann}) when is_atom(Name) ->
     case Ret of
         {_, Pid} when is_pid(Pid) ->
             %% assume lookup and send is atomic (actually not in Beam VM)
-            {ok, ok} = ?cc_nodelay_send_msg(get_ctl(), Ann, self(), Pid, Msg),
+            %% XXX change it back to preemptible temporarily
+            {ok, ok} = ?cc_send_msg(get_ctl(), Ann, self(), Pid, Msg),
             case Opts of
                 [] -> Msg;
                 _ -> ok
@@ -2408,7 +2418,8 @@ handle_erlang(send, [{Name, Node}, Msg | Opts], {_Old, _New, Ann}) when is_atom(
     case Ret of
         {_, Pid} when is_pid(Pid) ->
             %% assume lookup and send is atomic (actually not in Beam VM)
-            {ok, ok} = ?cc_nodelay_send_msg(get_ctl(), Ann, self(), Pid, Msg),
+            %% XXX change it back to preemptible temporarily
+            {ok, ok} = ?cc_send_msg(get_ctl(), Ann, self(), Pid, Msg),
             case Opts of
                 [] -> Msg;
                 _ -> ok
