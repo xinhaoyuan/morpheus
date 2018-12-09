@@ -104,6 +104,7 @@
         , undet_signals    :: integer()
         , undet_kick       :: undefined | reference()
         , undet_nifs       :: [{atom(), atom(), integer()} | {atom(), atom()} | {atom()} | atom()]
+        , scheduler_push_counter :: integer()
         , weight_table     :: dict:dict()
         }).
 
@@ -327,6 +328,7 @@ ctl_init(Opts) ->
         , undet_signals = 0
         , undet_kick = undefined
         , undet_nifs = proplists:get_value(undet_nifs, Opts, [])
+        , scheduler_push_counter = 0
         , weight_table = dict:new()
         },
     S.
@@ -595,7 +597,8 @@ ctl_pop_request_from_buffer(#sandbox_state{waiting_counter = WC, waiting = Waiti
 
 ctl_push_request_to_scheduler(#sandbox_state{ opt = #sandbox_opt{fd_scheduler = Sched}
                                             , proc_shtable = SHT
-                                            , weight_table = WT} = S,
+                                            , weight_table = WT
+                                            , scheduler_push_counter = SPC} = S,
                               Req) when Sched =/= undefined ->
     #fd_delay_req{data = #{where := Where, from := From} = Data} = Req,
     Data1 =
@@ -622,7 +625,7 @@ ctl_push_request_to_scheduler(#sandbox_state{ opt = #sandbox_opt{fd_scheduler = 
                 Data#{weight => Weight}
         end,
     Sched ! Req#fd_delay_req{data = Data1},
-    S.
+    S#sandbox_state{scheduler_push_counter = SPC + 1}.
 
 ctl_notify_scheduler(#sandbox_state{opt = #sandbox_opt{fd_scheduler = Sched}} = S)
   when Sched =/= undefined ->
@@ -809,6 +812,8 @@ ctl_handle_call(S, Where, {maybe_delay, Req}) ->
 ctl_handle_call(S, _Where, {log, _L}) ->
     %% ?INFO("Log: ~p", [_L]),
     {S, ok};
+ctl_handle_call(#sandbox_state{scheduler_push_counter = SPC} = S, _Where, {query, scheduler_push_counter}) ->
+    {S, SPC};
 ctl_handle_call(S, _Where, ?cci_initial_kick()) ->
     {S#sandbox_state{initial = false}, ok};
 ctl_handle_call(S, _Where, {ets_op}) ->
