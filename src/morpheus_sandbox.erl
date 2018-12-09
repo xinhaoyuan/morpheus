@@ -1620,7 +1620,14 @@ ctl_handle_call(#sandbox_state{opt = #sandbox_opt{fd_scheduler = FdSched, diffis
             %% No need to synchronize since the message ordering is guaranteed
             FdSched ! {hint, {set_guidance, Resp}}
     end,
-    {S, ok}.
+    {S, ok};
+ctl_handle_call(S, Where, R) ->
+    ?ERROR("undefined ctl call ~p~n"
+           "  state = ~p~n"
+           "  where = ~p~n"
+           "  ignored",
+           [R, S, Where]),
+    {S, undefined}.
 
 ctl_process_ets_on_exit(#sandbox_state{proc_shtable = ShTab} = S, Proc) ->
     {S1, HandledList} =
