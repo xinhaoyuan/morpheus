@@ -30,6 +30,7 @@
 -include_lib("firedrill/include/firedrill.hrl").
 
 -define(H, morpheus_helper).
+-define(T, morpheus_tracer).
 
 -define(LOCAL_NODE_NAME, 'nonode@nohost').
 
@@ -69,8 +70,8 @@
         , aux_module            :: undefined | module()
         , undet_timeout         :: integer()
         , fd_opts               :: term()
-        , fd_scheduler          :: pid()
-        , trace_tab             :: undefined | ets:tid()
+        , fd_scheduler          :: undefined | pid()
+        , tracer_pid            :: undefined | pid()
         , diffiso_port          :: undefined | integer()
         }).
 -record(timeout_entry,
@@ -143,7 +144,7 @@ sht_abs_id(SHT, Proc) ->
             Proc
     end.
 
-ctl_trace_send(#sandbox_opt{trace_send = Trace, aux_module = Aux, trace_tab = Tab} = Opt, SHT,
+ctl_trace_send(#sandbox_opt{trace_send = Trace, aux_module = Aux, tracer_pid = TP} = Opt, SHT,
                Where, From, To, Type, Content, Effect) ->
     case {Trace, ?SHTABLE_GET(SHT, tracing)} of
         {true, {_, true}} ->
@@ -157,12 +158,11 @@ ctl_trace_send(#sandbox_opt{trace_send = Trace, aux_module = Aux, trace_tab = Ta
             end;
         _ -> ok
     end,
-    case Tab of
+    case TP of
         undefined ->
             ok;
         _ ->
-            TC = ets:update_counter(Tab, trace_counter, 1),
-            ets:insert(Tab, {TC, morpheus_send, {Where, From, To, Type, Content, Effect}})
+            ?T:trace_send(TP, Where, From, To, Type, Content, Effect)
     end.
 
 ctl_trace_send_real(_Opt, _SHT,
@@ -172,7 +172,7 @@ ctl_trace_send_real(_Opt, _SHT,
                     Where, From, To, signal, Reason, _Effect) ->
     ?INFO("~w@~p -!-> ~w signal:~n  ~p", [From, Where, To, Reason]).
 
-ctl_trace_receive(#sandbox_opt{trace_receive = Trace, aux_module = Aux, trace_tab = Tab} = Opt, SHT,
+ctl_trace_receive(#sandbox_opt{trace_receive = Trace, aux_module = Aux, tracer_pid = TP} = Opt, SHT,
                   Where, To, Type, Content) ->
     case {Trace, ?SHTABLE_GET(SHT, tracing)} of
         {true, {_, true}} ->
@@ -186,12 +186,11 @@ ctl_trace_receive(#sandbox_opt{trace_receive = Trace, aux_module = Aux, trace_ta
             end;
         _ -> ok
     end,
-    case Tab of
+    case TP of
         undefined ->
             ok;
         _ ->
-            TC = ets:update_counter(Tab, trace_counter, 1),
-            ets:insert(Tab, {TC, morpheus_receive, {Where, To, Type, Content}})
+            ?T:trace_receive(TP, Where, To, Type, Content)
     end.
 
 ctl_trace_receive_real(_Opt, _SHT,
@@ -201,20 +200,30 @@ ctl_trace_receive_real(_Opt, _SHT,
                        Where, Proc, Type, undefined) ->
     ?INFO("~w@~p <-!-:~n  ~p", [Proc, Where, Type]).
 
-ctl_trace_new_process(#sandbox_opt{trace_send = TSend, trace_receive = TRecv, trace_tab = Tab}, SHT, Proc) ->
-    case TSend orelse TRecv orelse (Tab =/= undefined) of
+ctl_trace_new_process(#sandbox_opt{trace_send = TSend, trace_receive = TRecv, tracer_pid = TP}, SHT, Proc, Entry) ->
+    EntryInfo =
+        case Entry of
+            {mfa, _, _, _} ->
+                Entry;
+            {local, F, A} ->
+                {local, erlang:fun_info(F), A}
+        end,
+    EntryHash = erlang:phash2(Entry),
+    case TSend orelse TRecv orelse (TP =/= undefined) of
         true ->
             {_, AbsId} = ?SHTABLE_GET(SHT, {abs_id, Proc}),
             case TSend orelse TRecv of
                 true->
-                    ?INFO("~w created: ~w", [Proc, AbsId]);
+                    ?INFO("~w created: ~w~n"
+                          "  entry_hash: ~w~n"
+                          "  entry: ~p",
+                          [Proc, AbsId, EntryHash, EntryInfo]);
                 _ -> ok
             end,
-            case Tab of
+            case TP of
                 undefined -> ok;
                 _ ->
-                    TC = ets:update_counter(Tab, trace_counter, 1),
-                    ets:insert(Tab, {TC, morpheus_new_process, {Proc, AbsId}})
+                    ?T:trace_new_process(TP, Proc, AbsId, EntryInfo, EntryHash)
             end;
         _ -> ok
     end.
@@ -286,6 +295,14 @@ ctl_init(Opts) ->
                     | FdOpts ]),
                 whereis(fd_sched)
         end,
+    TracerPid =
+        case proplists:get_value(tracer_args, Opts) of
+            undefined ->
+                undefined;
+            TracerArgs ->
+                {ok, TP} = ?T:start_link(TracerArgs),
+                TP
+        end,
     S = #sandbox_state
         { opt = #sandbox_opt
           { verbose_ctl_req       = proplists:get_value(verbose_ctl, Opts, false)
@@ -302,7 +319,7 @@ ctl_init(Opts) ->
           , undet_timeout         = proplists:get_value(undet_timeout, Opts, 50)
           , fd_opts               = FdOpts
           , fd_scheduler          = FdSched
-          , trace_tab             = proplists:get_value(trace_tab, Opts, undefined)
+          , tracer_pid            = TracerPid
           , diffiso_port          = get_from_opts_or_env(diffiso_port, Opts, "DIFFISO_PORT", fun list_to_integer/1)
           }
         , initial = true
@@ -377,7 +394,7 @@ start(M, F, A, Opts) ->
                         NewGI:init(),
                         instrumented_process_end(?CATCH(apply(RealM, F, A)))
                 end),
-    instrumented_process_created(Ctl, global_start, ShTab, Node, Pid),
+    instrumented_process_created(Ctl, global_start, ShTab, Node, Pid, {mfa, M, F, A}),
     instrumented_process_kick(Ctl, Node, Pid),
     Ret.
 
@@ -403,10 +420,9 @@ ctl_check_heartbeat(#sandbox_state{opt = #sandbox_opt{heartbeat = once}} = S) ->
 ctl_check_heartbeat(_) ->
     ok.
 
-ctl_call_et_trace(#sandbox_state{opt = #sandbox_opt{trace_tab = undefined}} = S, _From, _Where, _Req) -> S;
-ctl_call_et_trace(#sandbox_state{opt = #sandbox_opt{trace_tab = Tab}} = S, From, Where, Req) ->
-    TC = ets:update_counter(Tab, trace_counter, 1),
-    ets:insert(Tab, {TC, morpheus_call, {From, Where, Req}}),
+ctl_call_et_trace(#sandbox_state{opt = #sandbox_opt{tracer_pid = undefined}} = S, _From, _Where, _Req) -> S;
+ctl_call_et_trace(#sandbox_state{opt = #sandbox_opt{tracer_pid = TP}} = S, From, Where, Req) ->
+    ?T:trace_call(TP, From, Where, Req),
     S;
 ctl_call_et_trace(S, _, _, _) ->
      S.
@@ -763,7 +779,7 @@ ctl_call_to_delay(true, ?cci_get_opt()) -> false;
 ctl_call_to_delay(true, {resource_acquire, _}) -> false;
 ctl_call_to_delay(true, ?cci_instrument_module(_)) -> false;
 ctl_call_to_delay(true, ?cci_node_created(_)) -> false;
-ctl_call_to_delay(true, ?cci_instrumented_process_created(_, _)) -> false;
+ctl_call_to_delay(true, ?cci_instrumented_process_created(_, _, _)) -> false;
 ctl_call_to_delay(true, ?cci_process_receive(_, _, _)) -> false;
 %% ctl_call_to_delay(true, {receive_timeout, _, _}) -> false;
 %% to delay?
@@ -1009,13 +1025,13 @@ ctl_handle_call(#sandbox_state
                 , abs_id_counter = AIDC
                 , transient_counter = TC
                 , alive_counter = AC} = S,
-                _Where, ?cci_instrumented_process_created(Node, Proc)) ->
+                _Where, ?cci_instrumented_process_created(Node, Proc, Entry)) ->
     case {?TABLE_GET(PT, {proc, Proc}), ?TABLE_GET(PT, {node, Node})} of
         {{_, _}, _} ->
             ?ERROR("instrumented_process_created happened twice", []),
             {S, badarg};
         {undefined, {_, {Status, _}}} when Status =:= offline; Status =:= online ->
-            ctl_trace_new_process(Opt, SHT, Proc),
+            ctl_trace_new_process(Opt, SHT, Proc, Entry),
             erlang:link(Proc),
             PT0 = ?TABLE_SET(PT,  {proc, Proc}, {alive, dict:new()}),
             PT1 = ?TABLE_SET(PT0, {name, Proc}, {Node, []}),
@@ -1915,7 +1931,7 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT} = S, Reason) ->
     ets:delete(MT),
     ets:delete(PT),
     ?INFO("ctl stop transient = ~p, lives = ~p, deads = ~p", [S#sandbox_state.transient_counter, Lives, Deads]),
-    #sandbox_state{opt = #sandbox_opt{fd_opts = FdOpts, fd_scheduler = FdSched, diffiso_port = DiffisoPort}} = S,
+    #sandbox_state{opt = #sandbox_opt{fd_opts = FdOpts, fd_scheduler = FdSched, diffiso_port = DiffisoPort, tracer_pid = TP}} = S,
     case DiffisoPort of
         undefined ->
             ok;
@@ -1934,6 +1950,11 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT} = S, Reason) ->
             undefined;
         _ ->
             firedrill:stop()
+    end,
+    case TP of
+        undefined -> ok;
+        _ ->
+            ?T:stop(TP)
     end,
     exit(Reason).
 
@@ -2274,7 +2295,7 @@ get_instrumented_func(Ctl, Where, M, F, _A) ->
     {ok, NewM, _Nifs} = get_instrumented_module_info(Ctl, Where, M),
     {ok, NewM, F}.
 
-instrumented_process_created(Ctl, Where, ShTab, Node, Proc) ->
+instrumented_process_created(Ctl, Where, ShTab, Node, Proc, Entry) ->
     NewAbsId =
         case get(?PDK_ABS_ID) of
             undefined ->
@@ -2286,7 +2307,7 @@ instrumented_process_created(Ctl, Where, ShTab, Node, Proc) ->
                 {pid, Node, [C | PList]}
         end,
     ?SHTABLE_SET(ShTab, {abs_id, Proc}, NewAbsId),
-    {ok, ok} = ?cc_instrumented_process_created(Ctl, Where, Node, Proc).
+    {ok, ok} = ?cc_instrumented_process_created(Ctl, Where, Node, Proc, Entry).
 
 instrumented_process_kick(_Ctl, _Node, Proc) ->
     Proc ! start.
@@ -2807,7 +2828,7 @@ handle_erlang_spawn(Where, S, F) ->
                         instrumented_process_start(Ctl, Node, Opt, ShTab),
                         instrumented_process_end(?CATCH(F()))
                 end),
-    post_spawn(S, Ctl, Where, ShTab, Node, Pid).
+    post_spawn(S, Ctl, Where, ShTab, Node, Pid, {local, F, []}).
 
 handle_erlang_spawn(Where, S, Node, F) ->
     Ctl = get_ctl(),
@@ -2817,7 +2838,7 @@ handle_erlang_spawn(Where, S, Node, F) ->
                         instrumented_process_start(Ctl, Node, Opt, ShTab),
                         instrumented_process_end(?CATCH(F()))
                 end),
-    post_spawn(S, Ctl, Where, ShTab, Node, Pid).
+    post_spawn(S, Ctl, Where, ShTab, Node, Pid, {local, F, []}).
 
 handle_erlang_spawn(Where, S, M, F, A) ->
     Ctl = get_ctl(),
@@ -2834,7 +2855,7 @@ handle_erlang_spawn(Where, S, M, F, A) ->
                         instrumented_process_start(Ctl, Node, Opt, ShTab),
                         instrumented_process_end(?CATCH(apply(NewM, NewName, A)))
                 end),
-    post_spawn(S, Ctl, Where, ShTab, Node, Pid).
+    post_spawn(S, Ctl, Where, ShTab, Node, Pid, {mfa, M, F, A}).
 
 handle_erlang_spawn(Where, S, Node, M, F, A) ->
     Ctl = get_ctl(),
@@ -2850,10 +2871,10 @@ handle_erlang_spawn(Where, S, Node, M, F, A) ->
                         instrumented_process_start(Ctl, Node, Opt, ShTab),
                         instrumented_process_end(?CATCH(apply(NewM, NewName, A)))
                 end),
-    post_spawn(S, Ctl, Where, ShTab, Node, Pid).
+    post_spawn(S, Ctl, Where, ShTab, Node, Pid, {mfa, M, F, A}).
 
-post_spawn(S, Ctl, Where, ShTab, Node, Pid) ->
-    instrumented_process_created(Ctl, Where, ShTab, Node, Pid),
+post_spawn(S, Ctl, Where, ShTab, Node, Pid, Entry) ->
+    instrumented_process_created(Ctl, Where, ShTab, Node, Pid, Entry),
     Ret =
         case S of
             spawn ->
@@ -2881,7 +2902,7 @@ handle_erlang_spawn_opt(Where, F, Opts) ->
                     instrumented_process_start(Ctl, Node, Opt, ShTab),
                     instrumented_process_end(?CATCH(F()))
             end),
-    post_spawn_opt(Ctl, Where, ShTab, Node, Pid, Opts).
+    post_spawn_opt(Ctl, Where, ShTab, Node, Pid, Opts, {local, F, []}).
 
 handle_erlang_spawn_opt(Where, M, F, A, Opts) ->
     Ctl = get_ctl(),
@@ -2899,10 +2920,10 @@ handle_erlang_spawn_opt(Where, M, F, A, Opts) ->
                     instrumented_process_start(Ctl, Node, Opt, ShTab),
                     instrumented_process_end(?CATCH(apply(NewM, NewName, A)))
             end),
-    post_spawn_opt(Ctl, Where, ShTab, Node, Pid, Opts).
+    post_spawn_opt(Ctl, Where, ShTab, Node, Pid, Opts, {mfa, M, F, A}).
 
-post_spawn_opt(Ctl, Where, ShTab, Node, Pid, Opts) ->
-    instrumented_process_created(Ctl, Where, ShTab, Node, Pid),
+post_spawn_opt(Ctl, Where, ShTab, Node, Pid, Opts, Entry) ->
+    instrumented_process_created(Ctl, Where, ShTab, Node, Pid, Entry),
     case lists:member(link, Opts) of
         true ->
             call_ctl(Ctl, Where, {nodelay, ?cci_process_link(self(), Pid)});
@@ -3142,7 +3163,7 @@ start_node(Node, M, F, A) ->
                         apply(GIM, GIF, []),
                         instrumented_process_end(?CATCH(apply(EM, EF, A)))
                 end),
-    instrumented_process_created(Ctl, node_start, ShTab, Node, Pid),
+    instrumented_process_created(Ctl, node_start, ShTab, Node, Pid, {mfa, M, F, A}),
     instrumented_process_kick(Ctl, Node, Pid),
     Ctl.
 
