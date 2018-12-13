@@ -17,7 +17,7 @@ t_basic() ->
     Tab = ?T:create_ets_tab(),
     {Ctl, MRef} = ?S:start(?MODULE, basic_test_entry, [],
                            [ monitor
-                           , {tracer_args, [{tab, Tab}]}
+                           , {tracer_args, [{tab, Tab}, {acc_filename, "acc.dat"}]}
                            ]),
     success = receive {'DOWN', MRef, _, _, Reason} -> Reason end,
     ets:foldl(fun (E, Acc) ->
@@ -32,6 +32,7 @@ t_basic() ->
     [NodeCount1] = ets:lookup(AccTab, node_counter),
     %% [PathCount] = ets:lookup(AccTab, path_counter),
     %% io:format(user, "~p~n", [PathCount]),
+    os:cmd("rm acc.dat"),
     ok.
 
 basic_test_entry() ->
