@@ -191,18 +191,23 @@ merge_coverage(Tab, AccTab) ->
 %% Returns {MaxDepth, f}, where f has key from [0, MaxDepth] 
 calc_acc_fanout(AccTab) ->
     [Root] = ets:lookup(AccTab, root),
-    calc_acc_fanout(AccTab, [], Root, {0, 0, #{}}).
+    ChildrenMap =
+        ets:fold(
+          fun ({{From, _}, To}, Acc) when is_integer(From), is_integer(To) ->
+                  Acc#{From => [To | maps:get(From, Acc, [])]}
+          end, #{}, AccTab),
+    calc_acc_fanout(ChildrenMap, [], Root, {0, 0, #{}}).
 
 calc_acc_fanout(_, [], backtrack, {MaxDepth, 0, Result}) ->
     {MaxDepth, Result};
-calc_acc_fanout(AccTab, [[] | RestFrames], backtrack, {MaxDepth, Depth, Result}) ->
-    calc_acc_fanout(AccTab, RestFrames, backtrack, {MaxDepth, Depth - 1, Result});
-calc_acc_fanout(AccTab, [[Next | Others] | RestFrames], backtrack, {MaxDepth, Depth, Result}) ->
-    calc_acc_fanout(AccTab, [Others | RestFrames], Next, {MaxDepth, Depth + 1, Result});
-calc_acc_fanout(AccTab, Stack, Node, {MaxDepth, Depth, Result}) ->
+calc_acc_fanout(ChildrenMap, [[] | RestFrames], backtrack, {MaxDepth, Depth, Result}) ->
+    calc_acc_fanout(ChildrenMap, RestFrames, backtrack, {MaxDepth, Depth - 1, Result});
+calc_acc_fanout(ChildrenMap, [[Next | Others] | RestFrames], backtrack, {MaxDepth, Depth, Result}) ->
+    calc_acc_fanout(ChildrenMap, [Others | RestFrames], Next, {MaxDepth, Depth + 1, Result});
+calc_acc_fanout(ChildrenMap, Stack, Node, {MaxDepth, Depth, Result}) ->
     NewResult = Result#{Depth => maps:get(Depth, Result, 0) + 1},
-    Children = ets:match(AccTab, {{Node, '_'}, '$1'}),
-    calc_acc_fanout(AccTab, [Children | Stack], backtrack, {max(MaxDepth, Depth), Depth, NewResult}).
+    Children = maps:get(Node, ChildrenMap, []),
+    calc_acc_fanout(ChildrenMap, [Children | Stack], backtrack, {max(MaxDepth, Depth), Depth, NewResult}).
 
 %% gen_server.
 
