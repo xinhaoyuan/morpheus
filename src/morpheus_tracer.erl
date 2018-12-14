@@ -13,7 +13,9 @@
         , create_ets_tab/0
         , create_acc_ets_tab/0
         , open_or_create_acc_ets_tab/1
-        , merge_path/2
+        , merge_path_coverage/2
+        , merge_line_coverage/2
+        , merge_state_coverage/2
         , calc_acc_fanout/1
         ]).
 
@@ -25,8 +27,11 @@
         , terminate/2
         , code_change/3]).
 
--record(state, { tab :: ets:tid()
-               , acc_filename :: string()
+-record(state, { tab            :: ets:tid()
+               , acc_filename   :: string()
+               , path_coverage  :: boolean()
+               , line_coverage  :: boolean()
+               , state_coverage :: boolean()
                }).
 
 -include("morpheus_trace.hrl").
@@ -72,8 +77,8 @@ create_acc_ets_tab() ->
     Tab = ets:new(acc_tab, []),
     ets:insert(Tab, {root, 1}),
     ets:insert(Tab, {node_counter, 1}),
-    ets:insert(Tab, {path_counter, 0}),
-    ets:insert(Tab, {coverage_counter, 0}),
+    ets:insert(Tab, {path_coverage_counter, 0}),
+    ets:insert(Tab, {line_coverage_counter, 0}),
     Tab.
 
 open_or_create_acc_ets_tab(Filename) ->
@@ -84,7 +89,7 @@ open_or_create_acc_ets_tab(Filename) ->
       end).
 
 %% Merge per-actor path.
-merge_path(Tab, AccTab) ->
+merge_path_coverage(Tab, AccTab) ->
     ProcState =
         ets:foldl(
           fun (?TraceNewProcess(_, Proc, _AbsId, _Creator, _EntryInfo, EntryHash), ProcState) ->
@@ -154,34 +159,48 @@ merge_path(Tab, AccTab) ->
                      (_, {_, false}, Acc) ->
                          Acc
                  end, 0, ProcState),
-    ets:update_counter(AccTab, path_counter, NewPathCount),
+    ets:update_counter(AccTab, path_coverage_counter, NewPathCount),
     ok.
 
 %% Merge line coverage (approximately).
-merge_coverage(Tab, AccTab) ->
+merge_line_coverage(Tab, AccTab) ->
     ets:foldl(
       fun (?TraceCall(_, _From, Where, _Req), Acc) ->
-              case ets:insert_new(AccTab, {{coverage, Where}, 1}) of
+              case ets:insert_new(AccTab, {{line_coverage, Where}, 1}) of
                   true ->
-                      ets:update_counter(AccTab, coverage_counter, 1);
+                      ets:update_counter(AccTab, line_coverage_counter, 1);
                   false ->
-                      ets:update_counter(AccTab, {coverage, Where}, 1)
+                      ets:update_counter(AccTab, {line_coverage, Where}, 1)
               end,
               Acc;
           (?TraceSend(_, Where, _From, _To, _Type, _Content, _Effect), Acc) ->
-              case ets:insert_new(AccTab, {{coverage, Where}, 1}) of
+              case ets:insert_new(AccTab, {{line_coverage, Where}, 1}) of
                   true ->
-                      ets:update_counter(AccTab, coverage_counter, 1);
+                      ets:update_counter(AccTab, line_coverage_counter, 1);
                   false ->
-                      ets:update_counter(AccTab, {coverage, Where}, 1)
+                      ets:update_counter(AccTab, {line_coverage, Where}, 1)
               end,
               Acc;
           (?TraceRecv(_, Where, _To, _Type, _Content), Acc) ->
-              case ets:insert_new(AccTab, {{coverage, Where}, 1}) of
+              case ets:insert_new(AccTab, {{line_coverage, Where}, 1}) of
                   true ->
-                      ets:update_counter(AccTab, coverage_counter, 1);
+                      ets:update_counter(AccTab, line_coverage_counter, 1);
                   false ->
-                      ets:update_counter(AccTab, {coverage, Where}, 1)
+                      ets:update_counter(AccTab, {line_coverage, Where}, 1)
+              end,
+              Acc;
+          (_, Acc) ->
+              Acc
+      end, undefined, Tab).
+
+merge_state_coverage(Tab, AccTab) ->
+    ets:foldl(
+      fun (?TraceReportState(_, State), Acc) ->
+              case ets:insert_new(AccTab, {{state_coverage, State}, 1}) of
+                  true ->
+                      ets:update_counter(AccTab, state_coverage_counter, 1);
+                  false ->
+                      ets:update_counter(AccTab, {state_coverage, State}, 1)
               end,
               Acc;
           (_, Acc) ->
@@ -227,17 +246,43 @@ init(Args) ->
                 _T
         end,
     AccFilename = proplists:get_value(acc_filename, Args, undefined),
-    State = #state{tab = Tab, acc_filename = AccFilename},
+    PathCoverage = proplists:get_value(path_coverage, Args, false),
+    LineCoverage = proplists:get_value(line_coverage, Args, false),
+    StateCoverage = proplists:get_value(state_coverage, Args, false),
+    State = #state{ tab = Tab
+                  , acc_filename = AccFilename
+                  , path_coverage = PathCoverage
+                  , line_coverage = LineCoverage
+                  , state_coverage = StateCoverage
+                  },
     {ok, State}.
 
-handle_call({stop}, _From, #state{tab = Tab, acc_filename = AF} = State) when Tab =/= undefined, AF =/= undefined ->
+handle_call({stop}, _From, #state{tab = Tab, acc_filename = AF, path_coverage = PC, line_coverage = LC, state_coverage = SC} = State) when Tab =/= undefined, AF =/= undefined ->
     AccTab = open_or_create_acc_ets_tab(AF),
-    merge_path(Tab, AccTab),
-    merge_coverage(Tab, AccTab),
-    [PathCount] = ets:lookup(AccTab, path_counter),
-    [CoverageCount] = ets:lookup(AccTab, coverage_counter),
-    io:format(user, "path count = ~p~n", [PathCount]),
-    io:format(user, "coverage count = ~p~n", [CoverageCount]),
+    case PC of
+        true ->
+            merge_path_coverage(Tab, AccTab),
+            [{path_coverage_counter, PathCoverageCount}] = ets:lookup(AccTab, path_coverage_counter),
+            io:format(user, "path coverage count = ~p~n", [PathCoverageCount]);
+        false ->
+            ok
+    end,
+    case LC of
+        true ->
+            merge_line_coverage(Tab, AccTab),
+            [{line_coverage_counter, LineCoverageCount}] = ets:lookup(AccTab, line_coverage_counter),
+            io:format(user, "line coverage count = ~p~n", [LineCoverageCount]);
+        false ->
+            ok
+    end,
+    case SC of
+        true ->
+            merge_state_coverage(Tab, AccTab),
+            [{state_coverage_counter, StateCoverageCount}] = ets:lookup(AccTab, state_coverage_counter),
+            io:format(user, "state coverage count = ~p~n", [StateCoverageCount]);
+        false ->
+            ok
+    end,
     ets:tab2file(AccTab, AF, [{extended_info, [md5sum]}]),
     {reply, ok, State};
 handle_call(_Request, _From, State) ->
