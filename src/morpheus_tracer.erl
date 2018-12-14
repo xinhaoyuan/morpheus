@@ -86,7 +86,7 @@ merge_path(Tab, AccTab) ->
           fun (?TraceCall(_, _, _, _), Acc) ->
                   Acc;
               (?TraceNewProcess(_, Proc, _AbsId, _Creator, _EntryInfo, EntryHash), ProcState) ->
-                  [Root] = ets:lookup(AccTab, root),
+                  [{root, Root}] = ets:lookup(AccTab, root),
                   Branch = {new, Proc, EntryHash},
                   case ets:lookup(AccTab, {Root, Branch}) of
                       [] ->
@@ -190,11 +190,16 @@ merge_coverage(Tab, AccTab) ->
 %%   f(d) := how many path node are at the depth d
 %% Returns {MaxDepth, f}, where f has key from [0, MaxDepth] 
 calc_acc_fanout(AccTab) ->
-    [Root] = ets:lookup(AccTab, root),
+    [{root, Root}] = ets:lookup(AccTab, root),
     ChildrenMap =
-        ets:fold(
+        ets:foldl(
           fun ({{From, _}, To}, Acc) when is_integer(From), is_integer(To) ->
-                  Acc#{From => [To | maps:get(From, Acc, [])]}
+                  Acc#{From => [To | maps:get(From, Acc, [])]};
+              %% Dirty hack for Acc in last version ...
+              ({{{root, From}, _}, To}, Acc) when is_integer(From), is_integer(To) ->
+                  Acc#{From => [To | maps:get(From, Acc, [])]};
+              (_, Acc) ->
+                  Acc
           end, #{}, AccTab),
     calc_acc_fanout(ChildrenMap, [], Root, {0, 0, #{}}).
 
