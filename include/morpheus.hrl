@@ -1,0 +1,1 @@
+-define(_morpheus_report_state(State), {guest_report_state, State}).

@@ -2,3 +2,4 @@
 -define(TraceNewProcess(TS, Proc, AbsId, Creator, EntryInfo, EntryHash), {TS, new_process, {Proc, AbsId, Creator, EntryInfo, EntryHash}}).
 -define(TraceSend(TS, Where, From, To, Type, Content, Effect), {TS, send, {Where, From, To, Type, Content, Effect}}).
 -define(TraceRecv(TS, Where, To, Type, Content), {TS, send, {Where, To, Type, Content}}).
+-define(TraceReportState(TS, State), {TS, report_state, State}).

@@ -8,6 +8,7 @@
         , trace_new_process/6
         , trace_send/7
         , trace_receive/5
+        , trace_report_state/2
         , stop/1
         , create_ets_tab/0
         , create_acc_ets_tab/0
@@ -48,6 +49,9 @@ trace_send(T, Where, From, To, Type, Content, Effect) ->
 trace_receive(T, Where, To, Type, Content) ->
     gen_server:cast(T, {recv, Where, To, Type, Content}).
 
+trace_report_state(T, State) ->
+    gen_server:cast(T, {report_state, State}).
+
 stop(T) ->
     gen_server:call(T, {stop}).
 
@@ -83,9 +87,7 @@ open_or_create_acc_ets_tab(Filename) ->
 merge_path(Tab, AccTab) ->
     ProcState =
         ets:foldl(
-          fun (?TraceCall(_, _, _, _), Acc) ->
-                  Acc;
-              (?TraceNewProcess(_, Proc, _AbsId, _Creator, _EntryInfo, EntryHash), ProcState) ->
+          fun (?TraceNewProcess(_, Proc, _AbsId, _Creator, _EntryInfo, EntryHash), ProcState) ->
                   [{root, Root}] = ets:lookup(AccTab, root),
                   Branch = {new, Proc, EntryHash},
                   case ets:lookup(AccTab, {Root, Branch}) of
@@ -143,7 +145,7 @@ merge_path(Tab, AccTab) ->
                       false ->
                           ProcState
                   end;
-              ({trace_counter, _}, Acc) ->
+              (_, Acc) ->
                   Acc
           end, #{}, Tab),
     NewPathCount = maps:fold(
@@ -256,6 +258,10 @@ handle_cast({send, Where, From, To, Type, Content, Effect}, #state{tab = Tab} = 
 handle_cast({recv, Where, To, Type, Content}, #state{tab = Tab} = State) when Tab =/= undefined ->
     TC = ets:update_counter(Tab, trace_counter, 1),
     ets:insert(Tab, ?TraceRecv(TC, Where, To, Type, Content)),
+    {noreply, State};
+handle_cast({report_state, State}, #state{tab = Tab} = State) when Tab =/= undefined ->
+    TC = ets:update_counter(Tab, trace_counter, 1),
+    ets:insert(Tab, ?TraceReportState(TC, State)),
     {noreply, State};
 handle_cast(Msg, State) ->
     io:format(user, "Unknown trace cast ~p~n", [Msg]),

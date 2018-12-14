@@ -25,6 +25,8 @@
         , hibernate_entry/3
         ]).
 
+
+-include("../include/morpheus.hrl").
 -include("morpheus_priv.hrl").
 -include("morpheus_ctl_calls.hrl").
 -include_lib("firedrill/include/firedrill.hrl").
@@ -1637,6 +1639,9 @@ ctl_handle_call(#sandbox_state{opt = #sandbox_opt{fd_scheduler = FdSched, diffis
             %% No need to synchronize since the message ordering is guaranteed
             FdSched ! {hint, {set_guidance, Resp}}
     end,
+    {S, ok};
+ctl_handle_call(#sandbox_state{opt = #sandbox_opt{tracer_pid = TP}} = S, _Where, ?_morpheus_report_state(State)) ->
+    ?T:tracer_report_state(TP, State),
     {S, ok};
 ctl_handle_call(S, Where, R) ->
     ?ERROR("undefined ctl call ~p~n"
