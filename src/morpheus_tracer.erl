@@ -203,7 +203,7 @@ calc_acc_fanout(AccTab) ->
           end, #{}, AccTab),
     calc_acc_fanout(ChildrenMap, [], Root, {0, 0, #{}}).
 
-calc_acc_fanout(_, [], backtrack, {MaxDepth, 0, Result}) ->
+calc_acc_fanout(_, [], backtrack, {MaxDepth, _, Result}) ->
     {MaxDepth, Result};
 calc_acc_fanout(ChildrenMap, [[] | RestFrames], backtrack, {MaxDepth, Depth, Result}) ->
     calc_acc_fanout(ChildrenMap, RestFrames, backtrack, {MaxDepth, Depth - 1, Result});
