@@ -5,7 +5,7 @@
 -define(T, morpheus_tracer).
 
 main(["show-acc-fanout", AccFilename]) ->
-    AccTab = ets:file2tab(AccFilename, [{verify, true}]),
+    {ok, AccTab} = ets:file2tab(AccFilename, [{verify, true}]),
     {MaxDepth, Fanout} = ?T:calc_acc_fanout(AccTab),
     lists:foreach(
       fun (D) ->
