@@ -195,7 +195,7 @@ calc_acc_fanout(AccTab) ->
         ets:foldl(
           fun ({{From, _}, To}, Acc) when is_integer(From), is_integer(To) ->
                   Acc#{From => [To | maps:get(From, Acc, [])]};
-              %% Dirty hack for Acc in last version ...
+              %% Dirty hack for Acc in the last version ...
               ({{{root, From}, _}, To}, Acc) when is_integer(From), is_integer(To) ->
                   Acc#{From => [To | maps:get(From, Acc, [])]};
               (_, Acc) ->
