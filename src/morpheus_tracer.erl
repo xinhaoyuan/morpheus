@@ -59,7 +59,7 @@ create_ets_tab() ->
     Tab.
 
 open_or_create_ets(Filename, CreateFun) ->
-    case ets:file2tab(Filename) of
+    case ets:file2tab(Filename, [{verify, true}]) of
         {ok, ETS} ->
             ETS;
         {error, Reason} ->
@@ -208,7 +208,7 @@ handle_call({stop}, _From, #state{tab = Tab, acc_filename = AF} = State) when Ta
     [CoverageCount] = ets:lookup(AccTab, coverage_counter),
     io:format(user, "path count = ~p~n", [PathCount]),
     io:format(user, "coverage count = ~p~n", [CoverageCount]),
-    ets:tab2file(AccTab, AF),
+    ets:tab2file(AccTab, AF, [{extended_info, [md5sum]}]),
     {reply, ok, State};
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.
