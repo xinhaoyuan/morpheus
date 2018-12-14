@@ -13,6 +13,7 @@
         , create_acc_ets_tab/0
         , open_or_create_acc_ets_tab/1
         , merge_path/2
+        , calc_acc_fanout/1
         ]).
 
 %% gen_server.
@@ -27,10 +28,7 @@
                , acc_filename :: string()
                }).
 
--define(TCall(TS, From, Where, Req), {TS, call, {From, Where, Req}}).
--define(TNewProcess(TS, Proc, AbsId, Creator, EntryInfo, EntryHash), {TS, new_process, {Proc, AbsId, Creator, EntryInfo, EntryHash}}).
--define(TSend(TS, Where, From, To, Type, Content, Effect), {TS, send, {Where, From, To, Type, Content, Effect}}).
--define(TRecv(TS, Where, To, Type, Content), {TS, send, {Where, To, Type, Content}}).
+-include("morpheus_trace.hrl").
 
 %% API.
 
@@ -81,12 +79,13 @@ open_or_create_acc_ets_tab(Filename) ->
               create_acc_ets_tab()
       end).
 
+%% Merge per-actor path.
 merge_path(Tab, AccTab) ->
     ProcState =
         ets:foldl(
-          fun (?TCall(_, _, _, _), Acc) ->
+          fun (?TraceCall(_, _, _, _), Acc) ->
                   Acc;
-              (?TNewProcess(_, Proc, _AbsId, _Creator, _EntryInfo, EntryHash), ProcState) ->
+              (?TraceNewProcess(_, Proc, _AbsId, _Creator, _EntryInfo, EntryHash), ProcState) ->
                   [Root] = ets:lookup(AccTab, root),
                   Branch = {new, Proc, EntryHash},
                   case ets:lookup(AccTab, {Root, Branch}) of
@@ -102,7 +101,7 @@ merge_path(Tab, AccTab) ->
                       [{_, Next}] ->
                           ProcState#{Proc => {Next, false}}
                   end;
-              (?TSend(_, Where, From, To, Type, Content, _Effect), ProcState) ->
+              (?TraceSend(_, Where, From, To, Type, Content, _Effect), ProcState) ->
                   case maps:is_key(From, ProcState) of
                       true ->
                           #{From := {StateNode, _}} = ProcState,
@@ -123,7 +122,7 @@ merge_path(Tab, AccTab) ->
                       false ->
                           ProcState
                   end;
-              (?TRecv(_, Where, To, Type, Content), ProcState) ->
+              (?TraceRecv(_, Where, To, Type, Content), ProcState) ->
                   case maps:is_key(To, ProcState) of
                       true ->
                           #{To := {StateNode, _}} = ProcState,
@@ -156,9 +155,10 @@ merge_path(Tab, AccTab) ->
     ets:update_counter(AccTab, path_counter, NewPathCount),
     ok.
 
+%% Merge line coverage (approximately).
 merge_coverage(Tab, AccTab) ->
     ets:foldl(
-      fun (?TCall(_, _From, Where, _Req), Acc) ->
+      fun (?TraceCall(_, _From, Where, _Req), Acc) ->
               case ets:insert_new(AccTab, {{coverage, Where}, 1}) of
                   true ->
                       ets:update_counter(AccTab, coverage_counter, 1);
@@ -166,7 +166,7 @@ merge_coverage(Tab, AccTab) ->
                       ets:update_counter(AccTab, {coverage, Where}, 1)
               end,
               Acc;
-          (?TSend(_, Where, _From, _To, _Type, _Content, _Effect), Acc) ->
+          (?TraceSend(_, Where, _From, _To, _Type, _Content, _Effect), Acc) ->
               case ets:insert_new(AccTab, {{coverage, Where}, 1}) of
                   true ->
                       ets:update_counter(AccTab, coverage_counter, 1);
@@ -174,7 +174,7 @@ merge_coverage(Tab, AccTab) ->
                       ets:update_counter(AccTab, {coverage, Where}, 1)
               end,
               Acc;
-          (?TRecv(_, Where, _To, _Type, _Content), Acc) ->
+          (?TraceRecv(_, Where, _To, _Type, _Content), Acc) ->
               case ets:insert_new(AccTab, {{coverage, Where}, 1}) of
                   true ->
                       ets:update_counter(AccTab, coverage_counter, 1);
@@ -185,6 +185,24 @@ merge_coverage(Tab, AccTab) ->
           (_, Acc) ->
               Acc
       end, undefined, Tab).
+
+%% For a accumulated table, calculate the path tree fanout function
+%%   f(d) := how many path node are at the depth d
+%% Returns {MaxDepth, f}, where f has key from [0, MaxDepth] 
+calc_acc_fanout(AccTab) ->
+    [Root] = ets:lookup(AccTab, root),
+    calc_acc_fanout(AccTab, [], Root, {0, 0, #{}}).
+
+calc_acc_fanout(_, [], backtrack, {MaxDepth, 0, Result}) ->
+    {MaxDepth, Result};
+calc_acc_fanout(AccTab, [[] | RestFrames], backtrack, {MaxDepth, Depth, Result}) ->
+    calc_acc_fanout(AccTab, RestFrames, backtrack, {MaxDepth, Depth - 1, Result});
+calc_acc_fanout(AccTab, [[Next | Others] | RestFrames], backtrack, {MaxDepth, Depth, Result}) ->
+    calc_acc_fanout(AccTab, [Others | RestFrames], Next, {MaxDepth, Depth + 1, Result});
+calc_acc_fanout(AccTab, Stack, Node, {MaxDepth, Depth, Result}) ->
+    NewResult = Result#{Depth => maps:get(Depth, Result, 0) + 1},
+    Children = ets:match(AccTab, {{Node, '_'}, '$1'}),
+    calc_acc_fanout(AccTab, [Children | Stack], backtrack, {max(MaxDepth, Depth), Depth, NewResult}).
 
 %% gen_server.
 
@@ -215,19 +233,19 @@ handle_call(_Request, _From, State) ->
 
 handle_cast({call, From, Where, Req}, #state{tab = Tab} = State) when Tab =/= undefined ->
     TC = ets:update_counter(Tab, trace_counter, 1),
-    ets:insert(Tab, ?TCall(TC, From, Where, Req)),
+    ets:insert(Tab, ?TraceCall(TC, From, Where, Req)),
     {noreply, State};
 handle_cast({new_process, Proc, AbsId, Creator, EntryInfo, EntryHash}, #state{tab = Tab} = State) when Tab =/= undefined ->
     TC = ets:update_counter(Tab, trace_counter, 1),
-    ets:insert(Tab, ?TNewProcess(TC, Proc, AbsId, Creator, EntryInfo, EntryHash)),
+    ets:insert(Tab, ?TraceNewProcess(TC, Proc, AbsId, Creator, EntryInfo, EntryHash)),
     {noreply, State};
 handle_cast({send, Where, From, To, Type, Content, Effect}, #state{tab = Tab} = State) when Tab =/= undefined->
     TC = ets:update_counter(Tab, trace_counter, 1),
-    ets:insert(Tab, ?TSend(TC, Where, From, To, Type, Content, Effect)),
+    ets:insert(Tab, ?TraceSend(TC, Where, From, To, Type, Content, Effect)),
     {noreply, State};
 handle_cast({recv, Where, To, Type, Content}, #state{tab = Tab} = State) when Tab =/= undefined ->
     TC = ets:update_counter(Tab, trace_counter, 1),
-    ets:insert(Tab, ?TRecv(TC, Where, To, Type, Content)),
+    ets:insert(Tab, ?TraceRecv(TC, Where, To, Type, Content)),
     {noreply, State};
 handle_cast(Msg, State) ->
     io:format(user, "Unknown trace cast ~p~n", [Msg]),

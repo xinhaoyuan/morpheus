@@ -1,5 +1,6 @@
 PROJECT = morpheus
 DEPS = firedrill
+ESCRIPT_NAME = morpheus_cmd
 
 ifdef DEP_LOCAL
 
@@ -12,5 +13,7 @@ endif
 else
 dep_firedrill = git https://github.com/xinhaoyuan/firedrill.git
 endif
+
+
 
 include erlang.mk
