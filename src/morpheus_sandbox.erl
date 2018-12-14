@@ -200,7 +200,7 @@ ctl_trace_receive_real(_Opt, _SHT,
                        Where, Proc, Type, undefined) ->
     ?INFO("~w@~p <-!-:~n  ~p", [Proc, Where, Type]).
 
-ctl_trace_new_process(#sandbox_opt{trace_send = TSend, trace_receive = TRecv, tracer_pid = TP}, SHT, Proc, Entry) ->
+ctl_trace_new_process(#sandbox_opt{trace_send = TSend, trace_receive = TRecv, tracer_pid = TP}, SHT, Proc, Creator, Entry) ->
     EntryInfo =
         case Entry of
             {mfa, _, _, _} ->
@@ -215,15 +215,16 @@ ctl_trace_new_process(#sandbox_opt{trace_send = TSend, trace_receive = TRecv, tr
             case TSend orelse TRecv of
                 true->
                     ?INFO("~w created: ~w~n"
+                          "  creator: ~p~n"
                           "  entry_hash: ~w~n"
                           "  entry: ~p",
-                          [Proc, AbsId, EntryHash, EntryInfo]);
+                          [Proc, AbsId, Creator, EntryHash, EntryInfo]);
                 _ -> ok
             end,
             case TP of
                 undefined -> ok;
                 _ ->
-                    ?T:trace_new_process(TP, Proc, AbsId, EntryInfo, EntryHash)
+                    ?T:trace_new_process(TP, Proc, AbsId, Creator, EntryInfo, EntryHash)
             end;
         _ -> ok
     end.
@@ -394,7 +395,7 @@ start(M, F, A, Opts) ->
                         NewGI:init(),
                         instrumented_process_end(?CATCH(apply(RealM, F, A)))
                 end),
-    instrumented_process_created(Ctl, global_start, ShTab, Node, Pid, {mfa, M, F, A}),
+    instrumented_process_created(Ctl, global_start, ShTab, Node, Pid, initial, {mfa, M, F, A}),
     instrumented_process_kick(Ctl, Node, Pid),
     Ret.
 
@@ -779,7 +780,7 @@ ctl_call_to_delay(true, ?cci_get_opt()) -> false;
 ctl_call_to_delay(true, {resource_acquire, _}) -> false;
 ctl_call_to_delay(true, ?cci_instrument_module(_)) -> false;
 ctl_call_to_delay(true, ?cci_node_created(_)) -> false;
-ctl_call_to_delay(true, ?cci_instrumented_process_created(_, _, _)) -> false;
+ctl_call_to_delay(true, ?cci_instrumented_process_created(_, _, _, _)) -> false;
 ctl_call_to_delay(true, ?cci_process_receive(_, _, _)) -> false;
 %% ctl_call_to_delay(true, {receive_timeout, _, _}) -> false;
 %% to delay?
@@ -1025,13 +1026,13 @@ ctl_handle_call(#sandbox_state
                 , abs_id_counter = AIDC
                 , transient_counter = TC
                 , alive_counter = AC} = S,
-                _Where, ?cci_instrumented_process_created(Node, Proc, Entry)) ->
+                _Where, ?cci_instrumented_process_created(Node, Proc, Creator, Entry)) ->
     case {?TABLE_GET(PT, {proc, Proc}), ?TABLE_GET(PT, {node, Node})} of
         {{_, _}, _} ->
             ?ERROR("instrumented_process_created happened twice", []),
             {S, badarg};
         {undefined, {_, {Status, _}}} when Status =:= offline; Status =:= online ->
-            ctl_trace_new_process(Opt, SHT, Proc, Entry),
+            ctl_trace_new_process(Opt, SHT, Proc, Creator, Entry),
             erlang:link(Proc),
             PT0 = ?TABLE_SET(PT,  {proc, Proc}, {alive, dict:new()}),
             PT1 = ?TABLE_SET(PT0, {name, Proc}, {Node, []}),
@@ -2295,7 +2296,7 @@ get_instrumented_func(Ctl, Where, M, F, _A) ->
     {ok, NewM, _Nifs} = get_instrumented_module_info(Ctl, Where, M),
     {ok, NewM, F}.
 
-instrumented_process_created(Ctl, Where, ShTab, Node, Proc, Entry) ->
+instrumented_process_created(Ctl, Where, ShTab, Node, Proc, Creator, Entry) ->
     NewAbsId =
         case get(?PDK_ABS_ID) of
             undefined ->
@@ -2307,7 +2308,7 @@ instrumented_process_created(Ctl, Where, ShTab, Node, Proc, Entry) ->
                 {pid, Node, [C | PList]}
         end,
     ?SHTABLE_SET(ShTab, {abs_id, Proc}, NewAbsId),
-    {ok, ok} = ?cc_instrumented_process_created(Ctl, Where, Node, Proc, Entry).
+    {ok, ok} = ?cc_instrumented_process_created(Ctl, Where, Node, Proc, Creator, Entry).
 
 instrumented_process_kick(_Ctl, _Node, Proc) ->
     Proc ! start.
@@ -2874,7 +2875,7 @@ handle_erlang_spawn(Where, S, Node, M, F, A) ->
     post_spawn(S, Ctl, Where, ShTab, Node, Pid, {mfa, M, F, A}).
 
 post_spawn(S, Ctl, Where, ShTab, Node, Pid, Entry) ->
-    instrumented_process_created(Ctl, Where, ShTab, Node, Pid, Entry),
+    instrumented_process_created(Ctl, Where, ShTab, Node, Pid, self(), Entry),
     Ret =
         case S of
             spawn ->
@@ -2923,7 +2924,7 @@ handle_erlang_spawn_opt(Where, M, F, A, Opts) ->
     post_spawn_opt(Ctl, Where, ShTab, Node, Pid, Opts, {mfa, M, F, A}).
 
 post_spawn_opt(Ctl, Where, ShTab, Node, Pid, Opts, Entry) ->
-    instrumented_process_created(Ctl, Where, ShTab, Node, Pid, Entry),
+    instrumented_process_created(Ctl, Where, ShTab, Node, Pid, self(), Entry),
     case lists:member(link, Opts) of
         true ->
             call_ctl(Ctl, Where, {nodelay, ?cci_process_link(self(), Pid)});
@@ -3163,7 +3164,7 @@ start_node(Node, M, F, A) ->
                         apply(GIM, GIF, []),
                         instrumented_process_end(?CATCH(apply(EM, EF, A)))
                 end),
-    instrumented_process_created(Ctl, node_start, ShTab, Node, Pid, {mfa, M, F, A}),
+    instrumented_process_created(Ctl, node_start, ShTab, Node, Pid, self(), {mfa, M, F, A}),
     instrumented_process_kick(Ctl, Node, Pid),
     Ctl.
 

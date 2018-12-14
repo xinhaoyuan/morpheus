@@ -12,7 +12,7 @@
 -define(cci_get_clock(), {get_clock}).
 -define(cci_process_receive(Proc, PatFun, Timeout), {process_receive, Proc, PatFun, Timeout}).
 -define(cci_process_on_exit(Proc, Reason), {process_on_exit, Proc, Reason}).
--define(cci_instrumented_process_created(Node, Proc, Entry), {instrumented_process_created, Node, Proc, Entry}).
+-define(cci_instrumented_process_created(Node, Proc, Creator, Entry), {instrumented_process_created, Node, Proc, Creator, Entry}).
 -define(cci_instrumented_process_list(Node), {instrumented_process_list, Node}).
 -define(cci_instrumented_registered_list(Node), {instrumented_registered_list, Node}).
 -define(cci_process_monitor(Watcher, WatcherNode, Target), {process_monitor, Watcher, WatcherNode, Target}).
@@ -76,8 +76,8 @@
 -define(cc_process_on_exit(Ctl, Where, Proc, Reason),
         call_ctl(Ctl, Where, ?cci_process_on_exit(Proc, Reason))).
 
--define(cc_instrumented_process_created(Ctl, Where, Node, Proc, Entry),
-        call_ctl(Ctl, Where, ?cci_instrumented_process_created(Node, Proc, Entry))).
+-define(cc_instrumented_process_created(Ctl, Where, Node, Proc, Creator, Entry),
+        call_ctl(Ctl, Where, ?cci_instrumented_process_created(Node, Proc, Creator, Entry))).
 
 -define(cc_instrumented_process_list(Ctl, Where, Node),
         call_ctl(Ctl, Where, ?cci_instrumented_process_list(Node))).

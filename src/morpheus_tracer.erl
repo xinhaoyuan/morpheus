@@ -5,7 +5,7 @@
 %% API.
 -export([ start_link/1
         , trace_call/4
-        , trace_new_process/5
+        , trace_new_process/6
         , trace_send/7
         , trace_receive/5
         , stop/1
@@ -28,7 +28,7 @@
                }).
 
 -define(TCall(TS, From, Where, Req), {TS, call, {From, Where, Req}}).
--define(TNewProcess(TS, Proc, AbsId, EntryInfo, EntryHash), {TS, new_process, {Proc, AbsId, EntryInfo, EntryHash}}).
+-define(TNewProcess(TS, Proc, AbsId, Creator, EntryInfo, EntryHash), {TS, new_process, {Proc, AbsId, Creator, EntryInfo, EntryHash}}).
 -define(TSend(TS, Where, From, To, Type, Content, Effect), {TS, send, {Where, From, To, Type, Content, Effect}}).
 -define(TRecv(TS, Where, To, Type, Content), {TS, send, {Where, To, Type, Content}}).
 
@@ -41,8 +41,8 @@ start_link(Args) ->
 trace_call(T, From, Where, Req) ->
     gen_server:cast(T, {call, From, Where, Req}).
 
-trace_new_process(T, Proc, AbsId, EntryInfo, EntryHash) ->
-    gen_server:cast(T, {new_process, Proc, AbsId, EntryInfo, EntryHash}).
+trace_new_process(T, Proc, AbsId, Creator, EntryInfo, EntryHash) ->
+    gen_server:cast(T, {new_process, Proc, AbsId, Creator, EntryInfo, EntryHash}).
 
 trace_send(T, Where, From, To, Type, Content, Effect) ->
     gen_server:cast(T, {send, Where, From, To, Type, Content, Effect}).
@@ -86,7 +86,7 @@ merge_path(Tab, AccTab) ->
         ets:foldl(
           fun (?TCall(_, _, _, _), Acc) ->
                   Acc;
-              (?TNewProcess(_, Proc, _AbsId, _EntryInfo, EntryHash), ProcState) ->
+              (?TNewProcess(_, Proc, _AbsId, _Creator, _EntryInfo, EntryHash), ProcState) ->
                   [Root] = ets:lookup(AccTab, root),
                   Branch = {new, Proc, EntryHash},
                   case ets:lookup(AccTab, {Root, Branch}) of
@@ -217,9 +217,9 @@ handle_cast({call, From, Where, Req}, #state{tab = Tab} = State) when Tab =/= un
     TC = ets:update_counter(Tab, trace_counter, 1),
     ets:insert(Tab, ?TCall(TC, From, Where, Req)),
     {noreply, State};
-handle_cast({new_process, Proc, AbsId, EntryInfo, EntryHash}, #state{tab = Tab} = State) when Tab =/= undefined ->
+handle_cast({new_process, Proc, AbsId, Creator, EntryInfo, EntryHash}, #state{tab = Tab} = State) when Tab =/= undefined ->
     TC = ets:update_counter(Tab, trace_counter, 1),
-    ets:insert(Tab, ?TNewProcess(TC, Proc, AbsId, EntryInfo, EntryHash)),
+    ets:insert(Tab, ?TNewProcess(TC, Proc, AbsId, Creator, EntryInfo, EntryHash)),
     {noreply, State};
 handle_cast({send, Where, From, To, Type, Content, Effect}, #state{tab = Tab} = State) when Tab =/= undefined->
     TC = ets:update_counter(Tab, trace_counter, 1),
