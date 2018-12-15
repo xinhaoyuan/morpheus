@@ -1,6 +1,7 @@
 -module(morpheus_guest_real).
 
 -export([ call_ctl/1
+        , report_state/1
         , cast_ctl/1
         , get_node/0
         , exit_with/1
@@ -13,28 +14,35 @@
         , log/1
         ]).
 
+-include("morpheus_ctl_calls.hrl").
+
+-define(S, morpheus_sandbox).
+
 call_ctl(Args) ->
-    morpheus_sandbox:call_ctl(morpheus_sandbox:get_ctl(), undefined, {nodelay, Args}).
+    ?S:call_ctl(?S:get_ctl(), undefined, {nodelay, Args}).
+
+report_state(State) ->
+    call_ctl(?cci_guest_report_state(State)).
 
 cast_ctl(Args) ->
-    morpheus_sandbox:cast_ctl(morpheus_sandbox:get_ctl(), Args).
+    ?S:cast_ctl(?S:get_ctl(), Args).
 
 get_node() ->
-    morpheus_sandbox:get_node().
+    ?S:get_node().
 
 exit_with(Reason) ->
-    morpheus_sandbox:cast_ctl(morpheus_sandbox:get_ctl(), {stop, Reason}).
+    ?S:cast_ctl(?S:get_ctl(), {stop, Reason}).
 
 in_sandbox() ->
     true.
 
 start_node(Node, M, F, A) ->
-    morpheus_sandbox:start_node(Node, M, F, A).
+    ?S:start_node(Node, M, F, A).
 
 set_flags(Flags) ->
     lists:foreach(
       fun ({Name, Value}) ->
-              morpheus_sandbox:set_flag(Name, Value)
+              ?S:set_flag(Name, Value)
       end, Flags).
 
 get_code_path() ->
@@ -57,4 +65,4 @@ raw_apply(M, F, A) ->
     erlang:apply(M, F, A).
 
 log(L) ->
-    morpheus_sandbox:call_ctl(morpheus_sandbox:get_ctl(), undefined, {nodelay, {log, L}}).
+    ?S:call_ctl(?S:get_ctl(), undefined, {nodelay, {log, L}}).

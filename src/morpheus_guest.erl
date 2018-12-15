@@ -1,6 +1,7 @@
 -module(morpheus_guest).
 
 -export([ call_ctl/1
+        , report_state/1
         , cast_ctl/1
         , get_node/0
         , exit_with/1
@@ -14,6 +15,9 @@
         ]).
 
 call_ctl(_Args) ->
+    error(not_in_sandbox).
+
+report_state(_State) ->
     error(not_in_sandbox).
 
 cast_ctl(_Args) ->

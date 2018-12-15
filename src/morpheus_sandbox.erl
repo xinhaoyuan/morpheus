@@ -1640,7 +1640,7 @@ ctl_handle_call(#sandbox_state{opt = #sandbox_opt{fd_scheduler = FdSched, diffis
             FdSched ! {hint, {set_guidance, Resp}}
     end,
     {S, ok};
-ctl_handle_call(#sandbox_state{opt = #sandbox_opt{tracer_pid = TP}} = S, _Where, ?_morpheus_report_state(State)) ->
+ctl_handle_call(#sandbox_state{opt = #sandbox_opt{tracer_pid = TP}} = S, _Where, ?cci_guest_report_state(State)) ->
     ?T:tracer_report_state(TP, State),
     {S, ok};
 ctl_handle_call(S, Where, R) ->
