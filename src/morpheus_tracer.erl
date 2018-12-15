@@ -9,7 +9,7 @@
         , trace_send/7
         , trace_receive/5
         , trace_report_state/2
-        , stop/1
+        , stop/2
         , create_ets_tab/0
         , create_acc_ets_tab/0
         , open_or_create_acc_ets_tab/1
@@ -57,8 +57,8 @@ trace_receive(T, Where, To, Type, Content) ->
 trace_report_state(T, State) ->
     gen_server:cast(T, {report_state, State}).
 
-stop(T) ->
-    gen_server:call(T, {stop}).
+stop(T, SHT) ->
+    gen_server:call(T, {stop, SHT}).
 
 create_ets_tab() ->
     Tab = ets:new(trace_tab, [ordered_set, public, {write_concurrency, true}]),
@@ -195,18 +195,42 @@ merge_line_coverage(Tab, AccTab) ->
       end, undefined, Tab).
 
 merge_state_coverage(Tab, AccTab) ->
+    merge_state_coverage(Tab, AccTab, undefined).
+
+merge_state_coverage(Tab, AccTab, SimpMap) ->
     ets:foldl(
       fun (?TraceReportState(_, RState), Acc) ->
-              case ets:insert_new(AccTab, {{state_coverage, RState}, 1}) of
+              SimpState =
+                  case SimpMap of
+                      undefined ->
+                          RState;
+                      _ ->
+                          simplify(RState, SimpMap)
+                  end,
+              case ets:insert_new(AccTab, {{state_coverage, SimpState}, 1}) of
                   true ->
                       ets:update_counter(AccTab, state_coverage_counter, 1);
                   false ->
-                      ets:update_counter(AccTab, {state_coverage, RState}, 1)
+                      ets:update_counter(AccTab, {state_coverage, SimpState}, 1)
               end,
               Acc;
           (_, Acc) ->
               Acc
       end, undefined, Tab).
+
+extract_simplify_map(SHT) ->
+    ets:foldl(
+      fun ({{proc_abs_id, Proc}, Id}, Acc) ->
+              Acc#{Proc => Id};
+          ({{ref_abs_id, Ref}, Id}, Acc) ->
+              Acc#{Ref => Id};
+          (_, Acc) ->
+              Acc
+      end, #{}, SHT).
+
+simplify(Data, _SimpMap) ->
+    %% XXX do the work.
+    Data.
 
 %% For a accumulated table, calculate the path tree fanout function
 %%   f(d) := how many path node are at the depth d
@@ -258,7 +282,18 @@ init(Args) ->
                   },
     {ok, State}.
 
-handle_call({stop}, _From, #state{tab = Tab, acc_filename = AF, path_coverage = PC, line_coverage = LC, state_coverage = SC} = State) when Tab =/= undefined, AF =/= undefined ->
+handle_call({stop, SHT},
+            _From,
+            #state{ tab = Tab
+                  , acc_filename = AF
+                  , path_coverage = PC
+                  , line_coverage = LC
+                  , state_coverage = SC
+                  }
+            = State)
+  when Tab =/= undefined, AF =/= undefined ->
+    %% XXX use SHT to simplify states
+    SimpMap = extract_simplify_map(SHT),
     AccTab = open_or_create_acc_ets_tab(AF),
     case PC of
         true ->
@@ -278,7 +313,7 @@ handle_call({stop}, _From, #state{tab = Tab, acc_filename = AF, path_coverage = 
     end,
     case SC of
         true ->
-            merge_state_coverage(Tab, AccTab),
+            merge_state_coverage(Tab, AccTab, SimpMap),
             [{state_coverage_counter, StateCoverageCount}] = ets:lookup(AccTab, state_coverage_counter),
             io:format(user, "state coverage count = ~p~n", [StateCoverageCount]);
         false ->

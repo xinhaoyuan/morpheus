@@ -43,7 +43,7 @@
 -define(PDK_OPT, '$sandbox_opt').
 -define(PDK_SHTAB, '$sandbox_shtab').
 -define(PDK_ABS_ID, '$sandbox_abs_id').
--define(PDK_CREATION_COUNT, '$sandbox_creation_count').
+-define(PDK_PID_CREATION_COUNT, '$sandbox_pid_creation_count').
 -define(IS_INTERNAL_PDK(X),
         (case (X) of
              ?PDK_MOD_MAP -> true;
@@ -52,7 +52,7 @@
              ?PDK_OPT -> true;
              ?PDK_SHTAB -> true;
              ?PDK_ABS_ID -> true;
-             ?PDK_CREATION_COUNT -> true;
+             ?PDK_PID_CREATION_COUNT -> true;
              _ -> false
          end)).
 
@@ -139,7 +139,7 @@ ctl_state_format(S) ->
 
 -compile({nowarn_unused_function, [sht_abs_id/2]}).
 sht_abs_id(SHT, Proc) ->
-    case ?SHTABLE_GET(SHT, {abs_id, Proc}) of
+    case ?SHTABLE_GET(SHT, {proc_abs_id, Proc}) of
         {_, AbsId} ->
             AbsId;
         undefined ->
@@ -213,7 +213,7 @@ ctl_trace_new_process(#sandbox_opt{trace_send = TSend, trace_receive = TRecv, tr
     EntryHash = erlang:phash2(Entry),
     case TSend orelse TRecv orelse (TP =/= undefined) of
         true ->
-            {_, AbsId} = ?SHTABLE_GET(SHT, {abs_id, Proc}),
+            {_, AbsId} = ?SHTABLE_GET(SHT, {proc_abs_id, Proc}),
             case TSend orelse TRecv of
                 true->
                     ?INFO("~w created: ~w~n"
@@ -253,8 +253,10 @@ ctl_trace_new_process(#sandbox_opt{trace_send = TSend, trace_receive = TRecv, tr
 %% between sandboxed processes and ctl:
 %% {exit, PID} -> Reason - exit signal
 %% {ets, RealEtsRef} -> {VirtualEtsRef, Owner, HeirInfo} - set before a sandbox process give ets control to sandbox ctl
-%% {abs_id, PID} -> [Node, PList] - shared mapping of abstract id of process
+%% {proc_abs_id, PID} -> [Node, PList] - shared mapping of abstract id of process
 %% {scoped_weight, PID} -> Weight
+%% {ref_creation_counter, PID|ctl} -> Integer
+%% {ref_abs_id, REF} -> {Creator, Integer}
 
 -ifdef(OTP_RELEASE).
 -define(CATCH(EXP), ((fun () -> try {ok, EXP} catch error:R:ST -> {error, R, ST}; exit:R:ST -> {exit, R, ST}; throw:R:ST -> {throw, R, ST} end end)())).
@@ -1679,23 +1681,23 @@ ctl_process_ets_on_exit(#sandbox_state{proc_shtable = ShTab} = S, Proc) ->
                   end, HandledList),
     S1.
 
-ctl_monitor_proc(#sandbox_state{proc_table = PT} = S,
+ctl_monitor_proc(#sandbox_state{proc_table = PT, proc_shtable = SHT} = S,
                  Watcher, {Name, Node}, Object) ->
     case ?TABLE_GET(PT, {reg, Node, Name}) of
         {_, {proc, Target}} ->
             ctl_monitor_proc(S, Watcher, Target, Object);
         _ ->
-            Ref = make_ref(),
+            Ref = make_registered_ref(Watcher, SHT),
             %% Offline/online won't change since the Object passed in,
             %% so no translation here
             {S0, ok} = ctl_process_send(S, undefined, system, Watcher, {'DOWN', Ref, process, Object, noproc}),
             {S0, Ref}
     end;
-ctl_monitor_proc(#sandbox_state{proc_table = PT} = S,
+ctl_monitor_proc(#sandbox_state{proc_table = PT, proc_shtable = SHT} = S,
                  Watcher, Target, Object) ->
     case {?TABLE_GET(PT, {watching, Watcher}), ?TABLE_GET(PT, {monitored_by, Target})} of
         {{_, MList}, {_, WList}} ->
-            Ref = make_ref(),
+            Ref = make_registered_ref(Watcher, SHT),
             PT0 =
                 ?TABLE_SET(?TABLE_SET(PT, {watching, Watcher}, [{Ref, Target} | MList]),
                            {monitored_by, Target}, [{Ref, Watcher, Object} | WList]),
@@ -1720,11 +1722,11 @@ ctl_monitor_proc(#sandbox_state{proc_table = PT} = S,
                 end,
             case ToNotify of
                 true ->
-                    Ref = make_ref(),
+                    Ref = make_registered_ref(Watcher, SHT),
                     {S0, ok} = ctl_process_send(S, undefined, system, Watcher, {'DOWN', Ref, process, Object, noproc}),
                     {S0, Ref};
                 false ->
-                    Ref = make_ref(),
+                    Ref = make_registered_ref(Watcher, SHT),
                     {S, Ref}
             end
     end.
@@ -1902,7 +1904,7 @@ ctl_process_send_signal( #sandbox_state
             end
     end.
 
-ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT} = S, Reason) ->
+ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT, proc_shtable = SHT} = S, Reason) ->
     #sandbox_state{weight_table = WT} = S,
     ?INFO("Weight table:~n  ~p", [dict:to_list(WT)]),
     case Reason of
@@ -1964,7 +1966,7 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT} = S, Reason) ->
     case TP of
         undefined -> ok;
         _ ->
-            ?T:stop(TP)
+            ?T:stop(TP, SHT)
     end,
     exit(Reason).
 
@@ -2312,11 +2314,11 @@ instrumented_process_created(Ctl, Where, ShTab, Node, Proc, Creator, Entry) ->
                 %% Initial process
                 {pid, Node, []};
             {pid, _Node, PList} ->
-                C = get(?PDK_CREATION_COUNT),
-                put(?PDK_CREATION_COUNT, C + 1),
+                C = get(?PDK_PID_CREATION_COUNT),
+                put(?PDK_PID_CREATION_COUNT, C + 1),
                 {pid, Node, [C | PList]}
         end,
-    ?SHTABLE_SET(ShTab, {abs_id, Proc}, NewAbsId),
+    ?SHTABLE_SET(ShTab, {proc_abs_id, Proc}, NewAbsId),
     {ok, ok} = ?cc_instrumented_process_created(Ctl, Where, Node, Proc, Creator, Entry).
 
 instrumented_process_kick(_Ctl, _Node, Proc) ->
@@ -2350,15 +2352,31 @@ get_shtab() ->
         V -> V
     end.
 
+make_registered_ref(Creator, ShTab) ->
+    Ref = make_ref(),
+    register_ref_with_abs_id(Ref, Creator, ShTab),
+    Ref.
+
+register_ref_with_abs_id(Ref, Creator, ShTab) ->
+    Counter =
+        case ?SHTABLE_GET(ShTab, {ref_creation_counter, Creator}) of
+            undefined ->
+                0;
+            OldCounter ->
+                OldCounter + 1
+        end,
+    ?SHTABLE_SET(ShTab, {ref_creation_counter, Creator}, Counter),
+    ?SHTABLE_SET(ShTab, {ref_abs_id, Ref}, {Creator, Counter}).
+
 instrumented_process_start(Ctl, Node, Opt, ShTab) ->
     put(?PDK_CTL, Ctl),
     put(?PDK_NODE, Node),
     put(?PDK_OPT, Opt),
     put(?PDK_SHTAB, ShTab),
     receive start -> ok end,
-    {_, AbsId} = ?SHTABLE_GET(ShTab, {abs_id, self()}),
+    {_, AbsId} = ?SHTABLE_GET(ShTab, {proc_abs_id, self()}),
     put(?PDK_ABS_ID, AbsId),
-    put(?PDK_CREATION_COUNT, 0),
+    put(?PDK_PID_CREATION_COUNT, 0),
     ok.
 
 instrumented_process_end(V) ->
@@ -2425,6 +2443,8 @@ hibernate_entry(M, F, A) ->
 
 %% sandboxed lib erlang handling
 
+handle_erlang(make_ref, [], _Aux) ->
+    make_registered_ref(self(), get_shtab());
 handle_erlang('!', [T, M], Aux) ->
     handle_erlang(send, [T, M], Aux);
 handle_erlang(send, [Pid, M], {_Old, _New, Ann}) when is_pid(Pid) ->
@@ -2573,10 +2593,12 @@ handle_erlang(monitor, [process, {Name, Node}], {_Old, _New, Ann}) when is_atom(
         _ -> Ref
     end;
 handle_erlang(monitor, [port, Port], _Aux) ->
-    erlang:monitor(port, Port);
+    Ref = erlang:monitor(port, Port),
+    register_ref_with_abs_id(Ref, self(), get_shtab()),
+    Ref;
 handle_erlang(monitor, [_OtherType, _Object], _Aux) ->
     ?ERROR("Unsupported monitor type ~p of ~p", [_OtherType, _Object]),
-    make_ref();
+    make_registered_ref(self(), get_shtab());
 %% demonitor
 handle_erlang(demonitor, [Ref], {_Old, _New, Ann}) ->
     {ok, Ret} = ?cc_process_demonitor(get_ctl(), Ann, self(), Ref, []),
