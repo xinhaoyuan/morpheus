@@ -1644,7 +1644,7 @@ ctl_handle_call(#sandbox_state{opt = #sandbox_opt{tracer_pid = TP}} = S, _Where,
     case TP of
         undefined -> ok;
         _ ->
-            ?T:tracer_report_state(TP, State)
+            ?T:trace_report_state(TP, State)
     end,
     {S, ok};
 ctl_handle_call(S, Where, R) ->

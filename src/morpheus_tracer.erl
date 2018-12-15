@@ -79,6 +79,7 @@ create_acc_ets_tab() ->
     ets:insert(Tab, {node_counter, 1}),
     ets:insert(Tab, {path_coverage_counter, 0}),
     ets:insert(Tab, {line_coverage_counter, 0}),
+    ets:insert(Tab, {state_coverage_counter, 0}),
     Tab.
 
 open_or_create_acc_ets_tab(Filename) ->
@@ -195,12 +196,12 @@ merge_line_coverage(Tab, AccTab) ->
 
 merge_state_coverage(Tab, AccTab) ->
     ets:foldl(
-      fun (?TraceReportState(_, State), Acc) ->
-              case ets:insert_new(AccTab, {{state_coverage, State}, 1}) of
+      fun (?TraceReportState(_, RState), Acc) ->
+              case ets:insert_new(AccTab, {{state_coverage, RState}, 1}) of
                   true ->
                       ets:update_counter(AccTab, state_coverage_counter, 1);
                   false ->
-                      ets:update_counter(AccTab, {state_coverage, State}, 1)
+                      ets:update_counter(AccTab, {state_coverage, RState}, 1)
               end,
               Acc;
           (_, Acc) ->
@@ -304,9 +305,9 @@ handle_cast({recv, Where, To, Type, Content}, #state{tab = Tab} = State) when Ta
     TC = ets:update_counter(Tab, trace_counter, 1),
     ets:insert(Tab, ?TraceRecv(TC, Where, To, Type, Content)),
     {noreply, State};
-handle_cast({report_state, State}, #state{tab = Tab} = State) when Tab =/= undefined ->
+handle_cast({report_state, RState}, #state{tab = Tab} = State) when Tab =/= undefined ->
     TC = ets:update_counter(Tab, trace_counter, 1),
-    ets:insert(Tab, ?TraceReportState(TC, State)),
+    ets:insert(Tab, ?TraceReportState(TC, RState)),
     {noreply, State};
 handle_cast(Msg, State) ->
     io:format(user, "Unknown trace cast ~p~n", [Msg]),
