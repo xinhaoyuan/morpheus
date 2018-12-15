@@ -30,6 +30,7 @@
 -define(cci_unique_integer(), {unique_integer}).
 -define(cci_get_advice(), {get_advice}).
 -define(cci_guest_report_state(State), {guest_report_state, State}).
+-define(cci_log(Log), {log, Log}).
 
 -define(cc_node_created(Ctl, Where, Node),
         call_ctl(Ctl, Where, ?cci_node_created(Node))).

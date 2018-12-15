@@ -2,6 +2,7 @@
 
 -export([ call_ctl/1
         , report_state/1
+        , log/1
         , cast_ctl/1
         , get_node/0
         , exit_with/1
@@ -11,7 +12,6 @@
         , get_code_path/0
         , get_kernel_app/0
         , raw_apply/3
-        , log/1
         ]).
 
 -include("morpheus_ctl_calls.hrl").
@@ -23,6 +23,9 @@ call_ctl(Args) ->
 
 report_state(State) ->
     call_ctl(?cci_guest_report_state(State)).
+
+log(L) ->
+    call_ctl(?cci_log(L)).
 
 cast_ctl(Args) ->
     ?S:cast_ctl(?S:get_ctl(), Args).
@@ -63,6 +66,3 @@ get_kernel_app() ->
 
 raw_apply(M, F, A) ->
     erlang:apply(M, F, A).
-
-log(L) ->
-    ?S:call_ctl(?S:get_ctl(), undefined, {nodelay, {log, L}}).

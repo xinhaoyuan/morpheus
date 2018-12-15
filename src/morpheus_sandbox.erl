@@ -828,7 +828,7 @@ ctl_handle_call(S, Where, {delay, Req}) ->
     ctl_handle_call(S, Where, Req);
 ctl_handle_call(S, Where, {maybe_delay, Req}) ->
     ctl_handle_call(S, Where, Req);
-ctl_handle_call(S, _Where, {log, _L}) ->
+ctl_handle_call(S, _Where, ?cci_log(_L)) ->
     %% ?INFO("Log: ~p", [_L]),
     {S, ok};
 ctl_handle_call(#sandbox_state{scheduler_push_counter = SPC} = S, _Where, {query, scheduler_push_counter}) ->
@@ -2088,11 +2088,11 @@ handle(Old, New, Tag, Args, Ann) ->
                               true ->
                                   call_ctl(get_ctl(), Ann, {delay});
                               {true, Log} ->
-                                  call_ctl(get_ctl(), Ann, {delay, {log, Log}});
+                                  call_ctl(get_ctl(), Ann, {delay, ?cci_log(Log)});
                               false ->
                                   ok;
                               {false, Log} ->
-                                  call_ctl(get_ctl(), Ann, {nodelay, {log, Log}})
+                                  call_ctl(get_ctl(), Ann, {nodelay, ?cci_log(Log)})
                           end
                   end, Args);
         _ -> undefined
@@ -3045,7 +3045,7 @@ handle_ets(F, A, {_Old, _New, Ann}) ->
                         end
                       end, Ret);
         _ ->
-            call_ctl(get_ctl(), Ann, {maybe_delay, {log, {ets_op, F, A}}}),
+            call_ctl(get_ctl(), Ann, {maybe_delay, ?cci_log({ets_op, F, A})}),
             %% essentially we are trying to virtualize the ets namespace
             if
                 F =:= file2tab; F =:= tabfile_info; F =:= module_info; A =:= [] ->
