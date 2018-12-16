@@ -27,11 +27,12 @@
         , terminate/2
         , code_change/3]).
 
--record(state, { tab            :: ets:tid()
-               , acc_filename   :: string()
-               , path_coverage  :: boolean()
-               , line_coverage  :: boolean()
-               , state_coverage :: boolean()
+-record(state, { tab             :: ets:tid()
+               , acc_filename    :: string()
+               , acc_fork_period :: integer()
+               , path_coverage   :: boolean()
+               , line_coverage   :: boolean()
+               , state_coverage  :: boolean()
                }).
 
 -include("morpheus_trace.hrl").
@@ -77,6 +78,7 @@ open_or_create_ets(Filename, CreateFun) ->
 
 create_acc_ets_tab() ->
     Tab = ets:new(acc_tab, []),
+    ets:insert(Tab, {iteration_counter, 0}),
     ets:insert(Tab, {root, 1}),
     ets:insert(Tab, {node_counter, 1}),
     ets:insert(Tab, {path_coverage_counter, 0}),
@@ -290,11 +292,13 @@ init(Args) ->
                 _T
         end,
     AccFilename = proplists:get_value(acc_filename, Args, undefined),
+    AccForkPeriod = proplists:get_value(acc_fork_period, Args, 0),
     PathCoverage = proplists:get_value(path_coverage, Args, false),
     LineCoverage = proplists:get_value(line_coverage, Args, false),
     StateCoverage = proplists:get_value(state_coverage, Args, false),
     State = #state{ tab = Tab
                   , acc_filename = AccFilename
+                  , acc_fork_period = AccForkPeriod
                   , path_coverage = PathCoverage
                   , line_coverage = LineCoverage
                   , state_coverage = StateCoverage
@@ -305,15 +309,16 @@ handle_call({stop, SHT},
             _From,
             #state{ tab = Tab
                   , acc_filename = AF
+                  , acc_fork_period = AFP
                   , path_coverage = PC
                   , line_coverage = LC
                   , state_coverage = SC
                   }
             = State)
   when Tab =/= undefined, AF =/= undefined ->
-    %% XXX use SHT to simplify states
     SimpMap = extract_simplify_map(SHT),
     AccTab = open_or_create_acc_ets_tab(AF),
+    IC = ets:update_counter(AF, iteration_counter, 1),
     case PC of
         true ->
             merge_path_coverage(Tab, AccTab),
@@ -338,7 +343,15 @@ handle_call({stop, SHT},
         false ->
             ok
     end,
-    ets:tab2file(AccTab, AF, [{extended_info, [md5sum]}]),
+    %% Use (tmp; rename) to keep atomicity
+    ets:tab2file(AccTab, AF ++ ".tmp", [{extended_info, [md5sum]}]),
+    case AFP > 0 andalso IC rem AFP =:= 0 of
+        true ->
+            os:cmd(lists:flatten(io_lib:format("cp ~s ~s", [AF ++ ".tmp", AF ++ "." ++ integer_to_list(IC)])));
+        false ->
+            ok
+    end,
+    os:cmd(lists:flatten(io_lib:format("mv ~s ~s", [AF ++ ".tmp", AF]))),
     {reply, ok, State};
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.
