@@ -42,5 +42,33 @@ main(["show-states", AccFilename]) ->
               "  hit/it mean: ~w~n"
               "  hit/it variance: ~w~n",
               [TabCount, Mean, Variance]);
+main(["aggregate-states" | AccFilenames]) ->
+    Data = aggregate_acc_files(AccFilenames),
+    %% Count = length(AccFilenames),
+    maps:fold(
+      fun (_State, SData, Acc) ->
+              io:format("~w~n", [SData]),
+              Acc
+      end, undefined, Data),
+    ok;
 main(Args) ->
     io:format(standard_error, "Badarg: ~p~n", [Args]).
+
+aggregate_acc_files(Filenames) ->
+    aggregate_acc_files(Filenames, {1, #{}}).
+
+aggregate_acc_files([], {_, Result}) ->
+    Result;
+aggregate_acc_files([Filename | Others], {Index, Result}) ->
+    {ok, AccTab} = ets:file2tab(Filename, [{verify,true}]),
+    {StateCount, NewResult} =
+        ets:foldl(
+          fun ({{state_coverage, State}, Count}, {StateCount, CurResult}) ->
+                  OldStatus = maps:get(State, CurResult, #{}),
+                  {StateCount + 1, CurResult#{State => OldStatus#{Index => Count}}};
+              (_, Acc) ->
+                  Acc
+          end, {0, Result}, AccTab),
+    [{state_coverage_counter, TabCount}] = ets:lookup(AccTab, state_coverage_counter),
+    TabCount = StateCount,
+    aggregate_acc_files(Others, {Index + 1, NewResult}).
