@@ -16,8 +16,8 @@ main(["show-states", AccFilename]) ->
     {ok, AccTab} = ets:file2tab(AccFilename, [{verify,true}]),
     States =
         ets:foldl(
-          fun ({{state_coverage, State}, Count}, Acc) ->
-                  [{Count, State} | Acc];
+          fun ({{state_coverage, State}, HitCount, CoverCount}, Acc) ->
+                  [{HitCount, CoverCount, State} | Acc];
               (_, Acc) ->
                   Acc
           end, [], AccTab),
@@ -25,23 +25,27 @@ main(["show-states", AccFilename]) ->
     [{iteration_counter, ItCount}] = ets:lookup(AccTab, iteration_counter),
     TabCount = length(States),
     SortedStates = lists:sort(States),
-    HitSum =
+    {HitSum, CoverSum} =
         lists:foldr(
-          fun ({Count, State}, Sum) ->
-                  io:format("~w: ~p~n", [Count, State]),
-                  Sum + Count
-          end, 0, SortedStates),
-    Mean = HitSum / ItCount / TabCount,
-    Variance =
+          fun ({HitCount, CoverCount, State}, {HitSum, CoverSum}) ->
+                  io:format("~w, ~w: ~p~n", [HitCount, CoverCount, State]),
+                  {HitSum + HitCount, CoverSum + CoverCount}
+          end, {0, 0}, SortedStates),
+    HitMean = HitSum / ItCount / TabCount,
+    CoverMean = CoverSum / ItCount / TabCount,
+    {HitVariance, CoverVariance} =
         lists:foldr(
-          fun ({Count, _State}, VAcc) ->
-                  Diff = Count / ItCount - Mean,
-                  VAcc + Diff * Diff
-          end, 0, SortedStates),
+          fun ({HitCount, CoverCount, _State}, {HitV, CoverV}) ->
+                  HitDiff = HitCount / ItCount - HitMean,
+                  CoverDiff = CoverCount / ItCount - CoverMean,
+                  {HitV + HitDiff * HitDiff, CoverV + CoverDiff * CoverDiff}
+          end, {0, 0}, SortedStates),
     io:format("~w state listed.~n"
               "  hit/it mean: ~w~n"
-              "  hit/it variance: ~w~n",
-              [TabCount, Mean, Variance]);
+              "  hit/it variance: ~w~n"
+              "  cover/it mean: ~w~n"
+              "  cover/it variance: ~w~n",
+              [TabCount, HitMean, HitVariance, CoverMean, CoverVariance]);
 main(["aggregate-states" | AccFilenames]) ->
     Data = aggregate_acc_files(AccFilenames),
     %% Count = length(AccFilenames),
@@ -63,9 +67,9 @@ aggregate_acc_files([Filename | Others], {Index, Result}) ->
     {ok, AccTab} = ets:file2tab(Filename, [{verify,true}]),
     {StateCount, NewResult} =
         ets:foldl(
-          fun ({{state_coverage, State}, Count}, {StateCount, CurResult}) ->
+          fun ({{state_coverage, State}, HitCount, CoverCount}, {StateCount, CurResult}) ->
                   OldStatus = maps:get(State, CurResult, #{}),
-                  {StateCount + 1, CurResult#{State => OldStatus#{Index => Count}}};
+                  {StateCount + 1, CurResult#{State => OldStatus#{Index => {HitCount, CoverCount}}}};
               (_, Acc) ->
                   Acc
           end, {0, Result}, AccTab),

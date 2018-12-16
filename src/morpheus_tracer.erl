@@ -209,20 +209,22 @@ merge_state_coverage(Tab, AccTab, SimpMap) ->
                       undefined ->
                           RState;
                       _ ->
-                          SimpResult = simplify(RState, SimpMap),
-                          %% io:format(user,
-                          %%           "simplify: ~p~n"
-                          %%           "      to: ~p~n",
-                          %%           [RState, SimpResult]),
-                          SimpResult
+                          simplify(RState, SimpMap)
                   end,
-              case ets:insert_new(AccTab, {{state_coverage, SimpState}, 1}) of
+              case ets:insert_new(AccTab, {{state_coverage, SimpState}, 1, 1}) of
                   true ->
-                      ets:update_counter(AccTab, state_coverage_counter, 1);
+                      ets:update_counter(AccTab, state_coverage_counter, 1),
+                      Acc#{SimpState => true};
                   false ->
-                      ets:update_counter(AccTab, {state_coverage, SimpState}, 1)
-              end,
-              Acc;
+                      ets:update_counter(AccTab, {state_coverage, SimpState}, {2, 1}),
+                      case maps:is_key(SimpState, Acc) of
+                          false ->
+                              ets:update_counter(AccTab, {state_coverage, SimpState}, {3, 1}),
+                              Acc#{SimpState => true};
+                          true ->
+                              ok
+                      end
+              end;
           (_, Acc) ->
               Acc
       end, undefined, Tab).
