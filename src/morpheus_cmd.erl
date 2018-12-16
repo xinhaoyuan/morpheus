@@ -22,7 +22,7 @@ main(["show-states", AccFilename]) ->
               (_, Acc) ->
                   Acc
           end, 0, AccTab),
-    [{state_coverage_count, TabCount}] = ets:lookup(AccTab, state_coverage_count),
+    [{state_coverage_counter, TabCount}] = ets:lookup(AccTab, state_coverage_counter),
     TabCount = StateCount,
     io:format("~w state listed.~n", [StateCount]);
 main(Args) ->
