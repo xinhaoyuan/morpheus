@@ -318,7 +318,7 @@ handle_call({stop, SHT},
   when Tab =/= undefined, AF =/= undefined ->
     SimpMap = extract_simplify_map(SHT),
     AccTab = open_or_create_acc_ets_tab(AF),
-    IC = ets:update_counter(AF, iteration_counter, 1),
+    IC = ets:update_counter(AccTab, iteration_counter, 1),
     case PC of
         true ->
             merge_path_coverage(Tab, AccTab),
