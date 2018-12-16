@@ -22,6 +22,7 @@ main(["show-states", AccFilename]) ->
                   Acc
           end, [], AccTab),
     [{state_coverage_counter, TabCount}] = ets:lookup(AccTab, state_coverage_counter),
+    [{iteration_counter, ItCount}] = ets:lookup(AccTab, iteration_counter),
     TabCount = length(States),
     SortedStates = lists:sort(States),
     HitSum =
@@ -30,16 +31,16 @@ main(["show-states", AccFilename]) ->
                   io:format("~w: ~p~n", [Count, State]),
                   Sum + Count
           end, 0, SortedStates),
-    Mean = HitSum / TabCount,
+    Mean = HitSum / ItCount / TabCount,
     Variance =
         lists:foldr(
           fun ({Count, _State}, VAcc) ->
-                  Diff = Count - Mean,
+                  Diff = Count / ItCount - Mean,
                   VAcc + Diff * Diff
           end, 0, SortedStates),
     io:format("~w state listed.~n"
-              "  hit mean: ~w~n"
-              "  hit variance: ~w~n",
+              "  hit/it mean: ~w~n"
+              "  hit/it variance: ~w~n",
               [TabCount, Mean, Variance]);
 main(Args) ->
     io:format(standard_error, "Badarg: ~p~n", [Args]).
