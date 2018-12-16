@@ -222,7 +222,7 @@ merge_state_coverage(Tab, AccTab, SimpMap) ->
                               ets:update_counter(AccTab, {state_coverage, SimpState}, {3, 1}),
                               Acc#{SimpState => true};
                           true ->
-                              ok
+                              Acc
                       end
               end;
           (_, Acc) ->
