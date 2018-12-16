@@ -2362,7 +2362,7 @@ register_ref_with_abs_id(Ref, Creator, ShTab) ->
         case ?SHTABLE_GET(ShTab, {ref_creation_counter, Creator}) of
             undefined ->
                 0;
-            OldCounter ->
+            {_, OldCounter} ->
                 OldCounter + 1
         end,
     ?SHTABLE_SET(ShTab, {ref_creation_counter, Creator}, Counter),
