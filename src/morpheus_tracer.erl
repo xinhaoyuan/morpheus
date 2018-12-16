@@ -227,7 +227,7 @@ merge_state_coverage(Tab, AccTab, SimpMap) ->
               end;
           (_, Acc) ->
               Acc
-      end, undefined, Tab).
+      end, #{}, Tab).
 
 extract_simplify_map(SHT) ->
     ets:foldl(
