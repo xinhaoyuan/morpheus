@@ -210,7 +210,7 @@ merge_state_coverage(Tab, AccTab, SimpMap) ->
                           SimpResult = simplify(RState, SimpMap),
                           io:format(user,
                                     "simplify: ~p~n"
-                                    "      to: ~p~n"
+                                    "      to: ~p~n",
                                     [RState, SimpResult]),
                           SimpResult
                   end,
