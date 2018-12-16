@@ -301,11 +301,11 @@ ctl_init(Opts) ->
                 whereis(fd_sched)
         end,
     TracerPid =
-        case proplists:get_value(tracer_args, Opts) of
+        case proplists:get_value(tracer_opts, Opts) of
             undefined ->
                 undefined;
-            TracerArgs ->
-                {ok, TP} = ?T:start_link(TracerArgs),
+            TracerOpts ->
+                {ok, TP} = ?T:start_link(TracerOpts),
                 TP
         end,
     S = #sandbox_state
