@@ -14,16 +14,20 @@ main(["show-acc-fanout", AccFilename]) ->
       end, lists:seq(0, MaxDepth));
 main(["show-states", AccFilename]) ->
     {ok, AccTab} = ets:file2tab(AccFilename, [{verify,true}]),
-    StateCount =
+    States =
         ets:foldl(
           fun ({{state_coverage, State}, Count}, Acc) ->
-                  io:format("~w: ~p~n", [Count, State]),
-                  Acc + 1;
+                  [{Count, State} | Acc];
               (_, Acc) ->
                   Acc
-          end, 0, AccTab),
+          end, [], AccTab),
     [{state_coverage_counter, TabCount}] = ets:lookup(AccTab, state_coverage_counter),
-    TabCount = StateCount,
-    io:format("~w state listed.~n", [StateCount]);
+    TabCount = length(States),
+    lists:foldr(
+      fun ({Count, State}, Acc) ->
+              io:format("~w: ~p~n", [Count, State]),
+              Acc
+      end, undefined, lists:sort(States)),
+    io:format("~w state listed.~n", [TabCount]);
 main(Args) ->
     io:format(standard_error, "Badarg: ~p~n", [Args]).
