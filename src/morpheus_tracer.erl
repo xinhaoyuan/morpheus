@@ -36,6 +36,8 @@
 
 -include("morpheus_trace.hrl").
 
+-define(H, morpheus_helper).
+
 %% API.
 
 -spec start_link(term()) -> {ok, pid()}.
@@ -205,7 +207,9 @@ merge_state_coverage(Tab, AccTab, SimpMap) ->
                       undefined ->
                           RState;
                       _ ->
-                          simplify(RState, SimpMap)
+                          SimpResult = simplify(RState, SimpMap),
+                          io:format(user, "simplify: ~p => ~p~n", [RState, SimpResult]),
+                          SimpResult
                   end,
               case ets:insert_new(AccTab, {{state_coverage, SimpState}, 1}) of
                   true ->
@@ -228,8 +232,20 @@ extract_simplify_map(SHT) ->
               Acc
       end, #{}, SHT).
 
+simplify([H | T], SimpMap) ->
+    [simplify(H, SimpMap) | simplify(T, SimpMap)];
+simplify(Data, SimpMap) when is_tuple(Data) ->
+    list_to_tuple(simplify(tuple_to_list(Data), SimpMap));
+simplify(Data, SimpMap) when is_map(Data) ->
+    maps:fold(
+      fun (K, V, Acc) ->
+              Acc#{simplify(K, SimpMap) => simplify(V, SimpMap)}
+      end, #{}, Data);
+simplify(Data, SimpMap) when is_pid(Data) ->
+    maps:get({pid_abs_id, Data}, SimpMap, Data);
+simplify(Data, SimpMap) when is_reference(Data) ->
+    maps:get({ref_abs_id, Data}, SimpMap, Data);
 simplify(Data, _SimpMap) ->
-    %% XXX do the work.
     Data.
 
 %% For a accumulated table, calculate the path tree fanout function

@@ -1,6 +1,10 @@
 -module(morpheus_helper).
 
--export([take_nth/2, while/2, replace_pid/2, string_to_term/1]).
+-export([ take_nth/2
+        , while/2
+        , replace_pid/2
+        , string_to_term/1
+        ]).
 
 take_nth(N, List) ->
     take_nth(N, [], List).
