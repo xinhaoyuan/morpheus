@@ -246,9 +246,9 @@ simplify(Data, SimpMap) when is_map(Data) ->
               Acc#{simplify(K, SimpMap) => simplify(V, SimpMap)}
       end, #{}, Data);
 simplify(Data, SimpMap) when is_pid(Data) ->
-    maps:get({pid_abs_id, Data}, SimpMap, Data);
+    maps:get(Data, SimpMap, Data);
 simplify(Data, SimpMap) when is_reference(Data) ->
-    maps:get({ref_abs_id, Data}, SimpMap, Data);
+    maps:get(Data, SimpMap, Data);
 simplify(Data, _SimpMap) ->
     Data.
 
