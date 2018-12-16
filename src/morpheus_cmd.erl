@@ -18,7 +18,9 @@ main(["show-states", AccFilename]) ->
         ets:foldl(
           fun ({{state_coverage, State}, Count}, Acc) ->
                   io:format("~w: ~p~n", [Count, State]),
-                  Acc + 1
+                  Acc + 1;
+              (_, Acc) ->
+                  Acc
           end, 0, AccTab),
     [{state_coverage_count, TabCount}] = ets:lookup(AccTab, state_coverage_count),
     TabCount = StateCount,
