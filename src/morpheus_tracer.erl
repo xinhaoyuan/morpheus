@@ -208,7 +208,11 @@ merge_state_coverage(Tab, AccTab, SimpMap) ->
                           RState;
                       _ ->
                           SimpResult = simplify(RState, SimpMap),
-                          io:format(user, "simplify: ~p => ~p~n", [RState, SimpResult]),
+                          io:format(user,
+                                    "simplify: ~p~n"
+                                    "      to: ~p~n"
+                                    "simp map: ~p~n",
+                                    [RState, SimpResult, SimpMap]),
                           SimpResult
                   end,
               case ets:insert_new(AccTab, {{state_coverage, SimpState}, 1}) of
