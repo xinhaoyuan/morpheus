@@ -251,7 +251,12 @@ simplify(Data, SimpMap) when is_map(Data) ->
 simplify(Data, SimpMap) when is_pid(Data) ->
     maps:get(Data, SimpMap, Data);
 simplify(Data, SimpMap) when is_reference(Data) ->
-    maps:get(Data, SimpMap, Data);
+    case maps:get(Data, SimpMap, undefined) of
+        {Pid, CreationCount} ->
+            {simplify(Pid, SimpMap), CreationCount};
+        undefined ->
+            Data
+    end;
 simplify(Data, _SimpMap) ->
     Data.
 
