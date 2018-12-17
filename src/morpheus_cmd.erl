@@ -16,8 +16,8 @@ main(["show-states", AccFilename]) ->
     {ok, AccTab} = ets:file2tab(AccFilename, [{verify,true}]),
     States =
         ets:foldl(
-          fun ({{state_coverage, State}, HitCount, CoverCount}, Acc) ->
-                  [{HitCount, CoverCount, State} | Acc];
+          fun ({{state_coverage, State}, HitCount, CoverCount, SeedInfo}, Acc) ->
+                  [{HitCount, CoverCount, State, SeedInfo} | Acc];
               (_, Acc) ->
                   Acc
           end, [], AccTab),
@@ -27,15 +27,17 @@ main(["show-states", AccFilename]) ->
     SortedStates = lists:sort(States),
     {HitSum, CoverSum} =
         lists:foldr(
-          fun ({HitCount, CoverCount, State}, {HitSum, CoverSum}) ->
-                  io:format("~w, ~w: ~p~n", [HitCount, CoverCount, State]),
+          fun ({HitCount, CoverCount, State, SeedInfo}, {HitSum, CoverSum}) ->
+                  io:format("~w, ~w. Seed = ~w~n"
+                            "  ~p~n",
+                            [HitCount, CoverCount, SeedInfo, State]),
                   {HitSum + HitCount, CoverSum + CoverCount}
           end, {0, 0}, SortedStates),
     HitMean = HitSum / ItCount / TabCount,
     CoverMean = CoverSum / ItCount / TabCount,
     {HitVariance, CoverVariance} =
         lists:foldr(
-          fun ({HitCount, CoverCount, _State}, {HitV, CoverV}) ->
+          fun ({HitCount, CoverCount, _State, _SeedInfo}, {HitV, CoverV}) ->
                   HitDiff = HitCount / ItCount - HitMean,
                   CoverDiff = CoverCount / ItCount - CoverMean,
                   {HitV + HitDiff * HitDiff, CoverV + CoverDiff * CoverDiff}
@@ -67,9 +69,9 @@ aggregate_acc_files([Filename | Others], {Index, Result}) ->
     {ok, AccTab} = ets:file2tab(Filename, [{verify,true}]),
     {StateCount, NewResult} =
         ets:foldl(
-          fun ({{state_coverage, State}, HitCount, CoverCount}, {StateCount, CurResult}) ->
+          fun ({{state_coverage, State}, HitCount, CoverCount, SeedInfo}, {StateCount, CurResult}) ->
                   OldStatus = maps:get(State, CurResult, #{}),
-                  {StateCount + 1, CurResult#{State => OldStatus#{Index => {HitCount, CoverCount}}}};
+                  {StateCount + 1, CurResult#{State => OldStatus#{Index => {HitCount, CoverCount, SeedInfo}}}};
               (_, Acc) ->
                   Acc
           end, {0, Result}, AccTab),

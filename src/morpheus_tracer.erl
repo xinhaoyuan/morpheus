@@ -9,7 +9,7 @@
         , trace_send/7
         , trace_receive/5
         , trace_report_state/2
-        , stop/2
+        , stop/3
         , create_ets_tab/0
         , create_acc_ets_tab/0
         , open_or_create_acc_ets_tab/1
@@ -60,8 +60,8 @@ trace_receive(T, Where, To, Type, Content) ->
 trace_report_state(T, State) ->
     gen_server:cast(T, {report_state, State}).
 
-stop(T, SHT) ->
-    gen_server:call(T, {stop, SHT}).
+stop(T, SeedInfo, SHT) ->
+    gen_server:call(T, {stop, SeedInfo, SHT}).
 
 create_ets_tab() ->
     Tab = ets:new(trace_tab, [ordered_set, public, {write_concurrency, true}]),
@@ -199,9 +199,9 @@ merge_line_coverage(Tab, AccTab) ->
       end, undefined, Tab).
 
 merge_state_coverage(Tab, AccTab) ->
-    merge_state_coverage(Tab, AccTab, undefined).
+    merge_state_coverage(Tab, undefined, AccTab, undefined).
 
-merge_state_coverage(Tab, AccTab, SimpMap) ->
+merge_state_coverage(Tab, SeedInfo, AccTab, SimpMap) ->
     ets:foldl(
       fun (?TraceReportState(_, RState), Acc) ->
               SimpState =
@@ -211,7 +211,7 @@ merge_state_coverage(Tab, AccTab, SimpMap) ->
                       _ ->
                           simplify(RState, SimpMap)
                   end,
-              case ets:insert_new(AccTab, {{state_coverage, SimpState}, 1, 1}) of
+              case ets:insert_new(AccTab, {{state_coverage, SimpState}, 1, 1, SeedInfo}) of
                   true ->
                       ets:update_counter(AccTab, state_coverage_counter, 1),
                       Acc#{SimpState => true};
@@ -312,7 +312,7 @@ init(Args) ->
                   },
     {ok, State}.
 
-handle_call({stop, SHT},
+handle_call({stop, SeedInfo, SHT},
             _From,
             #state{ tab = Tab
                   , acc_filename = AF
@@ -344,7 +344,7 @@ handle_call({stop, SHT},
     end,
     case SC of
         true ->
-            merge_state_coverage(Tab, AccTab, SimpMap),
+            merge_state_coverage(Tab, SeedInfo, AccTab, SimpMap),
             [{state_coverage_counter, StateCoverageCount}] = ets:lookup(AccTab, state_coverage_counter),
             io:format(user, "state coverage count = ~p~n", [StateCoverageCount]);
         false ->

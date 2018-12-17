@@ -1944,17 +1944,17 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT, proc_shtable = SHT} = S
     ets:delete(PT),
     ?INFO("ctl stop transient = ~p, lives = ~p, deads = ~p", [S#sandbox_state.transient_counter, Lives, Deads]),
     #sandbox_state{opt = #sandbox_opt{fd_opts = FdOpts, fd_scheduler = FdSched, diffiso_port = DiffisoPort, tracer_pid = TP}} = S,
+    FdSeedInfo =
+        case FdOpts of
+            undefined ->
+                undefined;
+            _ ->
+                fd_get_seed_info(FdSched)
+        end,
     case DiffisoPort of
         undefined ->
             ok;
         _ ->
-            FdSeedInfo =
-                case FdOpts of
-                    undefined ->
-                        undefined;
-                    _ ->
-                        fd_get_seed_info(FdSched)
-                end,
             diffiso_report(DiffisoPort, {FdSeedInfo, Reason})
     end,
     case FdOpts of
@@ -1966,7 +1966,7 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT, proc_shtable = SHT} = S
     case TP of
         undefined -> ok;
         _ ->
-            ?T:stop(TP, SHT)
+            ?T:stop(TP, FdSeedInfo, SHT)
     end,
     exit(Reason).
 
