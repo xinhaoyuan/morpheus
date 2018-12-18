@@ -3135,7 +3135,9 @@ handle_ets(F, A, {_Old, _New, Ann}) ->
                     end,
                     case Tid of
                         NewName -> Name;
-                        _ -> Tid
+                        _ ->
+                            register_ref_with_abs_id(Tid, self(), get_shtab()),
+                            Tid
                     end;
                 F =:= give_away, length(A) =:= 3 ->
                     [Tid, Pid, GiftData] = A,

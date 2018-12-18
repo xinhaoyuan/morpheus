@@ -242,7 +242,15 @@ extract_simplify_map(SHT) ->
 simplify([H | T], SimpMap) ->
     [simplify(H, SimpMap) | simplify(T, SimpMap)];
 simplify(Data, SimpMap) when is_tuple(Data) ->
-    list_to_tuple(simplify(tuple_to_list(Data), SimpMap));
+    %% The magic size is from experiments on OTP-20
+    case size(Data) > 0 andalso element(1, Data) of
+        dict when size(Data) =:= 9 ->
+            {dict, simplify(dict:to_list(Data), SimpMap)};
+        set when size(Data) =:= 9 ->
+            {set, simplify(sets:to_list(Data), SimpMap)};
+        _ ->
+            list_to_tuple(simplify(tuple_to_list(Data), SimpMap))
+    end;
 simplify(Data, SimpMap) when is_map(Data) ->
     maps:fold(
       fun (K, V, Acc) ->
