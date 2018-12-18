@@ -1,0 +1,7 @@
+-define(MORPHEUS_CB_TRACE_SEND_FILTER, '$morpheus$trace_send_filter').
+-define(MORPHEUS_CB_TRACE_RECEIVE_FILTER, '$morpheus$trace_receive_filter').
+-define(MORPHEUS_CB_DELAY_LEVEL, '$morpheus$delay_level').
+-define(MORPHEUS_CB_TO_DELAY_CALL, '$morpheus$to_delay_call').
+-define(MORPHEUS_CB_TO_OVERRIDE, '$morpheus$to_override').
+-define(MORPHEUS_CB_IS_SCOPED, '$morpheus$is_scoped').
+-define(MORPHEUS_CB_HANDLE_OVERRIDE, '$morpheus$handle_override').
