@@ -91,14 +91,16 @@ main(["aggregate-states" | AccFilenames]) ->
                                             end, undefined, ItInfo)}
                                          | Acc]
                                 end, [], SData))),
-                      RowString = lists:join(
-                                    ",",
-                                    lists:map(
-                                      fun (I) when is_integer(I) ->
-                                              integer_to_list(I);
-                                          (_) -> ""
-                                      end, Row)),
-                      io:format("~s~n", RowString),
+                      RowString =
+                          lists:flatten(
+                            lists:join(
+                              ",",
+                              lists:map(
+                                fun (I) when is_integer(I) ->
+                                        integer_to_list(I);
+                                    (_) -> ""
+                                end, Row))),
+                      io:format("~s~n", [RowString]),
                       _Acc
               end, undefined, Data);
         false ->
