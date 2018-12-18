@@ -63,13 +63,51 @@ main(["show-states", AccFilename]) ->
               [TabCount, HitMean, HitVariance, IterationMean, IterationVariance]);
 main(["aggregate-states" | AccFilenames]) ->
     Data = aggregate_acc_files(AccFilenames),
-    %% Count = length(AccFilenames),
-    maps:fold(
-      fun (_State, SData, Acc) ->
-              io:format("~w~n", [SData]),
-              Acc
-      end, undefined, Data),
-    ok;
+    CSV = case os:getenv("CSV") of
+              false -> false;
+              "" -> false;
+              _ -> true
+          end,
+    case CSV of
+        true ->
+            Count = length(AccFilenames),
+            maps:fold(
+              fun (_State, SData, _Acc) ->
+                      Row =
+                          tuple_to_list(
+                            erlang:make_tuple(
+                              Count, undefined,
+                              maps:fold(
+                                fun (K, {_, _, ItInfo}, Acc) ->
+                                        [{K,
+                                          lists:foldl(
+                                            fun ({_, Depth}, MinDepth) ->
+                                                    case MinDepth =:= undefined orelse MinDepth > Depth of
+                                                        true ->
+                                                            Depth;
+                                                        false ->
+                                                            MinDepth
+                                                    end
+                                            end, undefined, ItInfo)}
+                                         | Acc]
+                                end, [], SData))),
+                      RowString = lists:join(
+                                    ",",
+                                    lists:map(
+                                      fun (I) when is_integer(I) ->
+                                              integer_to_list(I);
+                                          (_) -> ""
+                                      end, Row)),
+                      io:format("~s~n", RowString),
+                      _Acc
+              end, undefined, Data);
+        false ->
+            maps:fold(
+              fun (_State, SData, Acc) ->
+                      io:format("~w~n", [SData]),
+                      Acc
+              end, undefined, Data)
+    end;
 main(Args) ->
     io:format(standard_error, "Badarg: ~p~n", [Args]).
 
