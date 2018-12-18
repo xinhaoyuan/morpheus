@@ -16,8 +16,8 @@ main(["show-states", AccFilename]) ->
     {ok, AccTab} = ets:file2tab(AccFilename, [{verify,true}]),
     States =
         ets:foldl(
-          fun ({{state_coverage, State}, HitCount, CoverCount, SeedInfo}, Acc) ->
-                  [{HitCount, CoverCount, State, SeedInfo} | Acc];
+          fun ({{state_coverage, State}, HitCount, IterationCount, Iterations}, Acc) ->
+                  [{HitCount, IterationCount, State, Iterations} | Acc];
               (_, Acc) ->
                   Acc
           end, [], AccTab),
@@ -25,29 +25,29 @@ main(["show-states", AccFilename]) ->
     [{iteration_counter, ItCount}] = ets:lookup(AccTab, iteration_counter),
     TabCount = length(States),
     SortedStates = lists:sort(States),
-    {HitSum, CoverSum} =
+    {HitSum, IterationSum} =
         lists:foldr(
-          fun ({HitCount, CoverCount, State, SeedInfo}, {HitSum, CoverSum}) ->
-                  io:format("~w, ~w. Seed = ~w~n"
+          fun ({HitCount, IterationCount, State, Iterations}, {HitSum, IterationSum}) ->
+                  io:format("~w, ~w. Iterations = ~w~n"
                             "  ~p~n",
-                            [HitCount, CoverCount, SeedInfo, State]),
-                  {HitSum + HitCount, CoverSum + CoverCount}
+                            [HitCount, IterationCount, Iterations, State]),
+                  {HitSum + HitCount, IterationSum + IterationCount}
           end, {0, 0}, SortedStates),
     HitMean = HitSum / ItCount / TabCount,
-    CoverMean = CoverSum / ItCount / TabCount,
-    {HitVariance, CoverVariance} =
+    IterationMean = IterationSum / ItCount / TabCount,
+    {HitVariance, IterationVariance} =
         lists:foldr(
-          fun ({HitCount, CoverCount, _State, _SeedInfo}, {HitV, CoverV}) ->
+          fun ({HitCount, IterationCount, _State, _Iterations}, {HitV, IterationV}) ->
                   HitDiff = HitCount / ItCount - HitMean,
-                  CoverDiff = CoverCount / ItCount - CoverMean,
-                  {HitV + HitDiff * HitDiff, CoverV + CoverDiff * CoverDiff}
+                  IterationDiff = IterationCount / ItCount - IterationMean,
+                  {HitV + HitDiff * HitDiff, IterationV + IterationDiff * IterationDiff}
           end, {0, 0}, SortedStates),
     io:format("~w state listed.~n"
               "  hit/it mean: ~w~n"
               "  hit/it variance: ~w~n"
               "  cover/it mean: ~w~n"
               "  cover/it variance: ~w~n",
-              [TabCount, HitMean, HitVariance, CoverMean, CoverVariance]);
+              [TabCount, HitMean, HitVariance, IterationMean, IterationVariance]);
 main(["aggregate-states" | AccFilenames]) ->
     Data = aggregate_acc_files(AccFilenames),
     %% Count = length(AccFilenames),
@@ -69,9 +69,9 @@ aggregate_acc_files([Filename | Others], {Index, Result}) ->
     {ok, AccTab} = ets:file2tab(Filename, [{verify,true}]),
     {StateCount, NewResult} =
         ets:foldl(
-          fun ({{state_coverage, State}, HitCount, CoverCount, SeedInfo}, {StateCount, CurResult}) ->
+          fun ({{state_coverage, State}, HitCount, IterationCount, Iterations}, {StateCount, CurResult}) ->
                   OldStatus = maps:get(State, CurResult, #{}),
-                  {StateCount + 1, CurResult#{State => OldStatus#{Index => {HitCount, CoverCount, SeedInfo}}}};
+                  {StateCount + 1, CurResult#{State => OldStatus#{Index => {HitCount, IterationCount, Iterations}}}};
               (_, Acc) ->
                   Acc
           end, {0, Result}, AccTab),

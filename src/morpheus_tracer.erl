@@ -8,7 +8,7 @@
         , trace_new_process/6
         , trace_send/7
         , trace_receive/5
-        , trace_report_state/2
+        , trace_report_state/3
         , stop/3
         , create_ets_tab/0
         , create_acc_ets_tab/0
@@ -57,8 +57,8 @@ trace_send(T, Where, From, To, Type, Content, Effect) ->
 trace_receive(T, Where, To, Type, Content) ->
     gen_server:cast(T, {recv, Where, To, Type, Content}).
 
-trace_report_state(T, State) ->
-    gen_server:cast(T, {report_state, State}).
+trace_report_state(T, Depth, State) ->
+    gen_server:cast(T, {report_state, Depth, State}).
 
 stop(T, SeedInfo, SHT) ->
     gen_server:call(T, {stop, SeedInfo, SHT}).
@@ -201,9 +201,9 @@ merge_line_coverage(Tab, AccTab) ->
 merge_state_coverage(Tab, AccTab) ->
     merge_state_coverage(Tab, undefined, AccTab, undefined).
 
-merge_state_coverage(Tab, SeedInfo, AccTab, SimpMap) ->
+merge_state_coverage(Tab, IterationId, AccTab, SimpMap) ->
     ets:foldl(
-      fun (?TraceReportState(_, RState), Acc) ->
+      fun (?TraceReportState(_, Depth, RState), Acc) ->
               SimpState =
                   case SimpMap of
                       undefined ->
@@ -211,7 +211,7 @@ merge_state_coverage(Tab, SeedInfo, AccTab, SimpMap) ->
                       _ ->
                           simplify(RState, SimpMap)
                   end,
-              case ets:insert_new(AccTab, {{state_coverage, SimpState}, 1, 1, SeedInfo}) of
+              case ets:insert_new(AccTab, {{state_coverage, SimpState}, 1, 1, [{IterationId, Depth}]}) of
                   true ->
                       ets:update_counter(AccTab, state_coverage_counter, 1),
                       Acc#{SimpState => true};
@@ -219,7 +219,11 @@ merge_state_coverage(Tab, SeedInfo, AccTab, SimpMap) ->
                       ets:update_counter(AccTab, {state_coverage, SimpState}, {2, 1}),
                       case maps:is_key(SimpState, Acc) of
                           false ->
-                              ets:update_counter(AccTab, {state_coverage, SimpState}, {3, 1}),
+                              case ets:lookup(AccTab, {state_coverage, SimpState}) of
+                                  [{_, _, ItCount, ItList}] ->
+                                      ets:update_element(AccTab, {state_coverage, SimpState},
+                                                         [{3, ItCount + 1}, {4, [{IterationId, Depth} | ItList]}])
+                              end,
                               Acc#{SimpState => true};
                           true ->
                               Acc
@@ -334,6 +338,7 @@ handle_call({stop, SeedInfo, SHT},
     SimpMap = extract_simplify_map(SHT),
     AccTab = open_or_create_acc_ets_tab(AF),
     IC = ets:update_counter(AccTab, iteration_counter, 1),
+    ets:insert(AccTab, {{iteration_seed, IC}, SeedInfo}),
     case PC of
         true ->
             merge_path_coverage(Tab, AccTab),
@@ -352,7 +357,7 @@ handle_call({stop, SeedInfo, SHT},
     end,
     case SC of
         true ->
-            merge_state_coverage(Tab, SeedInfo, AccTab, SimpMap),
+            merge_state_coverage(Tab, IC, AccTab, SimpMap),
             [{state_coverage_counter, StateCoverageCount}] = ets:lookup(AccTab, state_coverage_counter),
             io:format(user, "state coverage count = ~p~n", [StateCoverageCount]);
         false ->
@@ -387,9 +392,9 @@ handle_cast({recv, Where, To, Type, Content}, #state{tab = Tab} = State) when Ta
     TC = ets:update_counter(Tab, trace_counter, 1),
     ets:insert(Tab, ?TraceRecv(TC, Where, To, Type, Content)),
     {noreply, State};
-handle_cast({report_state, RState}, #state{tab = Tab} = State) when Tab =/= undefined ->
+handle_cast({report_state, Depth, RState}, #state{tab = Tab} = State) when Tab =/= undefined ->
     TC = ets:update_counter(Tab, trace_counter, 1),
-    ets:insert(Tab, ?TraceReportState(TC, RState)),
+    ets:insert(Tab, ?TraceReportState(TC, Depth, RState)),
     {noreply, State};
 handle_cast(Msg, State) ->
     io:format(user, "Unknown trace cast ~p~n", [Msg]),
