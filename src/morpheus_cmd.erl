@@ -12,6 +12,19 @@ main(["show-acc-fanout", AccFilename]) ->
               #{D := N} = Fanout,
               io:format("~w: ~w~n", [D, N])
       end, lists:seq(0, MaxDepth));
+main(["show-iterations", AccFilename]) ->
+    {ok, AccTab} = ets:file2tab(AccFilename, [{verify,true}]),
+    IterationList =
+        ets:foldl(
+          fun ({{iteration_seed, It}, Info}, Acc) ->
+                  [{It, Info} | Acc];
+              (_, Acc) ->
+                  Acc
+          end, [], AccTab),
+    lists:foreach(
+      fun ({It, Info}) ->
+              io:format("~w: ~p~n", [It, Info])
+      end, lists:sort(IterationList));
 main(["show-states", AccFilename]) ->
     {ok, AccTab} = ets:file2tab(AccFilename, [{verify,true}]),
     States =
