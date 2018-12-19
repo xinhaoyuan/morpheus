@@ -1,0 +1,125 @@
+diff --git a/erts/emulator/beam/atom.names b/erts/emulator/beam/atom.names
+index a14f22b19e..7fa0164b91 100644
+--- a/erts/emulator/beam/atom.names
++++ b/erts/emulator/beam/atom.names
+@@ -63,6 +63,9 @@ atom undefined_lambda
+ # and should never leak out to be seen by the user.
+ atom ErtsSecretAtom='3RT$'
+ 
++# Used by morpheus.
++atom fake_node
++
+ # All other atoms.  Try to keep the order alphabetic.
+ #
+ atom DOWN='DOWN'
+diff --git a/erts/emulator/beam/bif.c b/erts/emulator/beam/bif.c
+index 015c051cc1..58e3bd424d 100644
+--- a/erts/emulator/beam/bif.c
++++ b/erts/emulator/beam/bif.c
+@@ -828,7 +828,10 @@ BIF_RETTYPE spawn_opt_1(BIF_ALIST_1)
+ 		if (scheduler < 0 || erts_no_schedulers < scheduler)
+ 		    goto error;
+ 		so.scheduler = (int) scheduler;
+-	    } else {
++	    } else if (arg == am_fake_node && is_atom(val)) {
++                so.flags |= SPO_FAKE_NODE;
++                so.fake_node = val;
++            } else {
+ 		goto error;
+ 	    }
+ 	} else {
+diff --git a/erts/emulator/beam/bif.tab b/erts/emulator/beam/bif.tab
+index d4ba90a61a..11357543fb 100644
+--- a/erts/emulator/beam/bif.tab
++++ b/erts/emulator/beam/bif.tab
+@@ -700,6 +700,9 @@ ubif erlang:is_map_key/2
+ bif ets:internal_delete_all/2
+ bif ets:internal_select_delete/2
+ 
++# Used in morpheus.
++bif erlang:set_fake_node/2
++
+ #
+ # New in 21.2
+ #
+diff --git a/erts/emulator/beam/dist.c b/erts/emulator/beam/dist.c
+index 0633bff3c2..4499016155 100644
+--- a/erts/emulator/beam/dist.c
++++ b/erts/emulator/beam/dist.c
+@@ -3631,9 +3631,29 @@ BIF_RETTYPE node_1(BIF_ALIST_1)
+ { 
+     if (is_not_node_container(BIF_ARG_1))
+       BIF_ERROR(BIF_P, BADARG);
++    if (is_internal_pid(BIF_ARG_1)) {
++      Process * rp = erts_proc_lookup_raw(BIF_ARG_1);
++      if (rp && !is_same(rp->fake_node, NIL)) {
++        BIF_RET(rp->fake_node);
++      }
++    }
+     BIF_RET(node_container_node_name(BIF_ARG_1));
+ }
+ 
++BIF_RETTYPE set_fake_node_2(BIF_ALIST_2)
++{
++    Eterm proc = BIF_ARG_1;
++    Eterm name = BIF_ARG_2;
++    if (is_internal_pid(proc) && is_atom(name)) {
++      Process * rp = erts_proc_lookup_raw(proc);
++      if (rp) {
++        rp->fake_node = name;
++        BIF_RET(am_ok);
++      }
++    }
++    BIF_RET(am_badarg);
++}
++
+ /**********************************************************************/
+ /* node() -> Node */
+ 
+diff --git a/erts/emulator/beam/erl_process.c b/erts/emulator/beam/erl_process.c
+index 2427d87f66..064c98a043 100644
+--- a/erts/emulator/beam/erl_process.c
++++ b/erts/emulator/beam/erl_process.c
+@@ -11451,6 +11451,13 @@ erl_create_process(Process* parent, /* Parent of process (default group leader).
+     p->u.initial.function = func;
+     p->u.initial.arity = (Uint) arity;
+ 
++    if (so->flags & SPO_FAKE_NODE) {
++      p->fake_node = so->fake_node;
++    }
++    else {
++      p->fake_node = NIL;
++    }
++
+     /*
+      * Must initialize binary lists here before copying binaries to process.
+      */
+diff --git a/erts/emulator/beam/erl_process.h b/erts/emulator/beam/erl_process.h
+index a1b029adbe..0e95816e6f 100644
+--- a/erts/emulator/beam/erl_process.h
++++ b/erts/emulator/beam/erl_process.h
+@@ -1043,6 +1043,8 @@ struct process {
+     erts_atomic32_t state;  /* Process state flags (see ERTS_PSFLG_*) */
+     erts_atomic32_t dirty_state; /* Process dirty state flags (see ERTS_PDSFLG_*) */
+ 
++    Eterm fake_node;
++
+     ErtsSignalInQueue sig_inq;
+     ErlTraceMessageQueue *trace_msg_q;
+     erts_proc_lock_t lock;
+@@ -1273,6 +1275,7 @@ void erts_check_for_holes(Process* p);
+ #define SPO_SYSTEM_PROC 8
+ #define SPO_OFF_HEAP_MSGQ 16
+ #define SPO_ON_HEAP_MSGQ 32
++#define SPO_FAKE_NODE 64
+ 
+ extern int ERTS_WRITE_UNLIKELY(erts_default_spo_flags);
+ 
+@@ -1283,6 +1286,7 @@ typedef struct {
+     int flags;
+     int error_code;		/* Error code returned from create_process(). */
+     Eterm mref;			/* Monitor ref returned (if SPO_MONITOR was given). */
++    Eterm fake_node;
+ 
+     /*
+      * The following items are only initialized if the SPO_USE_ARGS flag is set.
