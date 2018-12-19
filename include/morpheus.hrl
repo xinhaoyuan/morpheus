@@ -1,11 +1,18 @@
 %% Aux module callback names. Made as macros to (sort of) separate CBs from regular functions.
--define(MORPHEUS_CB_TRACE_SEND_FILTER, '$morpheus$trace_send_filter').
--define(MORPHEUS_CB_TRACE_RECEIVE_FILTER, '$morpheus$trace_receive_filter').
--define(MORPHEUS_CB_DELAY_LEVEL, '$morpheus$delay_level').
--define(MORPHEUS_CB_TO_DELAY_CALL, '$morpheus$to_delay_call').
--define(MORPHEUS_CB_TO_OVERRIDE, '$morpheus$to_override').
--define(MORPHEUS_CB_IS_SCOPED, '$morpheus$is_scoped').
--define(MORPHEUS_CB_HANDLE_OVERRIDE, '$morpheus$handle_override').
+-define(MORPHEUS_CB_TRACE_SEND_FILTER_FN, '$morpheus$trace_send_filter').
+-define(MORPHEUS_CB_TRACE_SEND_FILTER(From, To, Type, Content), ?MORPHEUS_CB_TRACE_SEND_FILTER_FN(From, To, Type, Content)).
+-define(MORPHEUS_CB_TRACE_RECEIVE_FILTER_FN, '$morpheus$trace_receive_filter').
+-define(MORPHEUS_CB_TRACE_RECEIVE_FILTER(To, Type, Content), ?MORPHEUS_CB_TRACE_RECEIVE_FILTER_FN(To, Type, Content)).
+-define(MORPHEUS_CB_DELAY_LEVEL_FN, '$morpheus$delay_level').
+-define(MORPHEUS_CB_DELAY_LEVEL(Req), ?MORPHEUS_CB_DELAY_LEVEL_FN(Req)).
+-define(MORPHEUS_CB_TO_DELAY_CALL_FN, '$morpheus$to_delay_call').
+-define(MORPHEUS_CB_TO_DELAY_CALL(FromMod, M, F, A), ?MORPHEUS_CB_TO_DELAY_CALL_FN(FromMod, M, F, A)).
+-define(MORPHEUS_CB_TO_OVERRIDE_FN, '$morpheus$to_override').
+-define(MORPHEUS_CB_TO_OVERRIDE(M, F, A), ?MORPHEUS_CB_TO_OVERRIDE_FN(M, F, A)).
+-define(MORPHEUS_CB_IS_SCOPED_FN, '$morpheus$is_scoped').
+-define(MORPHEUS_CB_IS_SCOPED(Mod), ?MORPHEUS_CB_IS_SCOPED_FN(Mod)).
+-define(MORPHEUS_CB_HANDLE_OVERRIDE_FN, '$morpheus$handle_override').
+-define(MORPHEUS_CB_HANDLE_OVERRIDE(Old, New, F, Orig, A, Ann), ?MORPHEUS_CB_HANDLE_OVERRIDE_FN(Old, New, F, Orig, A, Ann)).
 
 %% ctl call tuples definition for avoiding mistakes.
 -define(cci_node_created(Node), {node_created, Node}).

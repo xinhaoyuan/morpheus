@@ -150,7 +150,7 @@ ctl_trace_send(#sandbox_opt{trace_send = Trace, aux_module = Aux, tracer_pid = T
     case {Trace, ?SHTABLE_GET(SHT, tracing)} of
         {true, {_, true}} ->
             case Aux =:= undefined
-                orelse not erlang:function_exported(Aux, ?MORPHEUS_CB_TRACE_SEND_FILTER, 4)
+                orelse not erlang:function_exported(Aux, ?MORPHEUS_CB_TRACE_SEND_FILTER_FN, 4)
                 orelse Aux:?MORPHEUS_CB_TRACE_SEND_FILTER(From, To, Type, Content) of
                 true ->
                     ctl_trace_send_real(Opt, SHT, Where, From, To, Type, Content, Effect);
@@ -178,7 +178,7 @@ ctl_trace_receive(#sandbox_opt{trace_receive = Trace, aux_module = Aux, tracer_p
     case {Trace, ?SHTABLE_GET(SHT, tracing)} of
         {true, {_, true}} ->
             case Aux =:= undefined
-                orelse not erlang:function_exported(Aux, ?MORPHEUS_CB_TRACE_RECEIVE_FILTER, 3)
+                orelse not erlang:function_exported(Aux, ?MORPHEUS_CB_TRACE_RECEIVE_FILTER_FN, 3)
                 orelse Aux:?MORPHEUS_CB_TRACE_RECEIVE_FILTER(To, Type, Content) of
                 true ->
                     ctl_trace_receive_real(Opt, SHT, Where, To, Type, Content);
@@ -527,7 +527,7 @@ ctl_loop(S0) ->
 
 fill_in_data(#sandbox_state{opt = #sandbox_opt{aux_module = Aux}}, Data, From, Req) ->
     D1 =
-        case (erlang:function_exported(Aux, ?MORPHEUS_CB_DELAY_LEVEL, 1) andalso
+        case (erlang:function_exported(Aux, ?MORPHEUS_CB_DELAY_LEVEL_FN, 1) andalso
               Aux:?MORPHEUS_CB_DELAY_LEVEL(Req)) of
             false ->
                 Data;
@@ -700,7 +700,7 @@ ctl_check_and_receive(#sandbox_state{opt = Opt,
                                           andalso (not OnlySend orelse is_send_req(OriginReq))
                                           andalso ctl_call_to_delay(
                                                     Aux =:= undefined orelse
-                                                    not erlang:function_exported(Aux, ?MORPHEUS_CB_TO_DELAY_CALL, 4),
+                                                    not erlang:function_exported(Aux, ?MORPHEUS_CB_TO_DELAY_CALL_FN, 4),
                                                     OriginReq),
                                       case ToSchedule of
                                           true ->
@@ -2038,7 +2038,7 @@ to_override(_, os, system_time, 0) -> {true, callback};
 to_override(_, os, system_time, 1) -> {true, callback};
 %% Regular case
 to_override(#sandbox_state{opt = #sandbox_opt{aux_module = Aux}}, M, F, A) ->
-    Aux =/= undefined andalso erlang:function_exported(Aux, ?MORPHEUS_CB_TO_OVERRIDE, 3) andalso Aux:?MORPHEUS_CB_TO_OVERRIDE(M, F, A).
+    Aux =/= undefined andalso erlang:function_exported(Aux, ?MORPHEUS_CB_TO_OVERRIDE_FN, 3) andalso Aux:?MORPHEUS_CB_TO_OVERRIDE(M, F, A).
 
 %% Hack
 to_expose(_, erl_eval, exprs, 5) -> true;
@@ -2066,7 +2066,7 @@ handle(Old, New, Tag, Args, Ann) ->
     end,
     case ScopedWeight
         andalso Aux =/= undefined
-        andalso erlang:function_exported(Aux, ?MORPHEUS_CB_IS_SCOPED, 1) of
+        andalso erlang:function_exported(Aux, ?MORPHEUS_CB_IS_SCOPED_FN, 1) of
         true ->
             case Aux:?MORPHEUS_CB_IS_SCOPED(Old) of
                 true ->
@@ -2083,7 +2083,7 @@ handle(Old, New, Tag, Args, Ann) ->
             ok
     end,
     case Aux =/= undefined
-        andalso erlang:function_exported(Aux, ?MORPHEUS_CB_TO_DELAY_CALL, 4)
+        andalso erlang:function_exported(Aux, ?MORPHEUS_CB_TO_DELAY_CALL_FN, 4)
         andalso Tag =:= call
          of
         true ->
