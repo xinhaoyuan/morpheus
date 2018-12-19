@@ -26,7 +26,7 @@
         ]).
 
 
--include("../include/morpheus.hrl").
+-include("morpheus.hrl").
 -include("morpheus_priv.hrl").
 -include_lib("firedrill/include/firedrill.hrl").
 
