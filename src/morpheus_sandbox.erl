@@ -28,7 +28,6 @@
 
 -include("../include/morpheus.hrl").
 -include("morpheus_priv.hrl").
--include("morpheus_ctl_calls.hrl").
 -include_lib("firedrill/include/firedrill.hrl").
 
 -define(H, morpheus_helper).

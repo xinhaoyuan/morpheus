@@ -14,7 +14,7 @@
         , raw_apply/3
         ]).
 
--include("morpheus_ctl_calls.hrl").
+-include("morpheus.hrl").
 
 -define(S, morpheus_sandbox).
 
