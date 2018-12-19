@@ -61,7 +61,7 @@ trace_report_state(T, Depth, State) ->
     gen_server:cast(T, {report_state, Depth, State}).
 
 stop(T, SeedInfo, SHT) ->
-    gen_server:call(T, {stop, SeedInfo, SHT}).
+    gen_server:call(T, {stop, SeedInfo, SHT}, infinity).
 
 create_ets_tab() ->
     Tab = ets:new(trace_tab, [ordered_set, public, {write_concurrency, true}]),
@@ -269,6 +269,9 @@ simplify(Data, SimpMap) when is_reference(Data) ->
         undefined ->
             Data
     end;
+simplify(Data, _SimpMap) when is_function(Data) ->
+    %% Function? Ignore for now...
+    {function};
 simplify(Data, _SimpMap) ->
     Data.
 

@@ -2179,9 +2179,9 @@ handle(Old, New, Tag, Args, Ann) ->
             %% HACK - changing_config does not exist in logger_simple_h,
             %% but will be called in bootstrap process - just to workaround it.
             case _A of
-                [SetOrUpdate, OldConfig, NewConfig] ->
+                [_SetOrUpdate, _OldConfig, NewConfig] ->
                     {ok, NewConfig};
-                [OldConfig, NewConfig] ->
+                [_OldConfig, NewConfig] ->
                     {ok, NewConfig}
             end;
         {call, [net_kernel, monitor_nodes, _A]} ->
