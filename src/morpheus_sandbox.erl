@@ -2173,9 +2173,17 @@ handle(Old, New, Tag, Args, Ann) ->
             {ok, true} = ?cc_register_external_process(get_ctl(), Ann, get_node(), user, RealUser),
             RealUser;
         {call, [logger_simple_h, changing_config, _A]} ->
-            [_OldConfig, NewConfig] = _A,
-            %% HACK - changing_config does not exist in logger_simple_h, but will be called in bootstrap process - just to workaround it.
-            {ok, NewConfig};
+            %% Memo: I guess the key problem here is that without this workaround,
+            %% calling to the function will throw undef error WITH the internal name of logger_simple_h, which will not be identified by the specific caller in OTP.
+
+            %% HACK - changing_config does not exist in logger_simple_h,
+            %% but will be called in bootstrap process - just to workaround it.
+            case _A of
+                [SetOrUpdate, OldConfig, NewConfig] ->
+                    {ok, NewConfig};
+                [OldConfig, NewConfig] ->
+                    {ok, NewConfig}
+            end;
         {call, [net_kernel, monitor_nodes, _A]} ->
             %% HACK - we do not really emulate nodeup and nodedown events
             ok;
