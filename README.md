@@ -4,13 +4,12 @@ Morpheus
 A research project to sandbox and model erlang/otp concurrency using dynamic code re-writing.
 The main purpose is for reliable and scalable concurrency testing in fully controlled environment.
 
-Only OTP-20 is tested so far.
+Tested on OTP-{20,21}.
 
 Build
 -----
 
     make
-
 
 Usage
 -----
@@ -103,7 +102,7 @@ Limitations
 
  - Simulating distributed settings requires patching Beam VM.
 
-   Patches are in otp-patches (so far only for OTP-20).
+   Patches are in otp-patches (so far only for OTP-{20,21}).
 
  - External inputs (i.e. ports and NIFs) need to be deterministic given the control of the erlang program.
 
