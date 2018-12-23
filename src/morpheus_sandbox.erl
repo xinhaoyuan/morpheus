@@ -318,7 +318,7 @@ ctl_init(Opts) ->
           , control_timeouts      = proplists:get_value(control_timeouts, Opts, true)
           , time_uncertainty      = proplists:get_value(time_uncertainty, Opts, 0)
           , stop_on_deadlock      = proplists:get_value(stop_on_deadlock, Opts, true)
-          , scoped_weight         = proplists:get_value(scoped_weight, Opts, false)
+          , scoped_weight         = proplists:get_value(scoped_weight, Opts, undefined)
           , heartbeat             = proplists:get_value(heartbeat, Opts, 10000)
           , aux_module            = proplists:get_value(aux_module, Opts, undefined)
           , aux_data              = proplists:get_value(aux_data, Opts, undefined)
@@ -628,7 +628,7 @@ ctl_push_request_to_scheduler(#sandbox_state{ opt = #sandbox_opt{fd_scheduler = 
             {_, W} ->
                 %% ?INFO("Set delay level to ~p from ~p", [W, From]),
                 ?SHTABLE_REMOVE(SHT, {scoped_weight, From}),
-                Data#{delay_level => W};
+                Data#{weight => W + 1};
             _ ->
                 Weight =
                     case ?SHTABLE_GET(SHT, race_weighted) of
@@ -2066,7 +2066,7 @@ handle(Old, New, Tag, Args, Ann) ->
             end;
         _ -> ok
     end,
-    case ScopedWeight
+    case ScopedWeight =/= undefined
         andalso Aux =/= undefined
         andalso erlang:function_exported(Aux, ?MORPHEUS_CB_IS_SCOPED_FN, 2) of
         true ->
@@ -2076,7 +2076,7 @@ handle(Old, New, Tag, Args, Ann) ->
                         {_, _} ->
                             ok;
                         _ ->
-                            ?SHTABLE_SET(get_shtab(), {scoped_weight, self()}, 1)
+                            ?SHTABLE_SET(get_shtab(), {scoped_weight, self()}, ScopedWeight)
                     end;
                 false ->
                     ok
