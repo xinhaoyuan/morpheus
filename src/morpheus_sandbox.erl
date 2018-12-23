@@ -69,6 +69,7 @@
         , scoped_weight         :: boolean()
         , heartbeat             :: false | once | integer()
         , aux_module            :: undefined | module()
+        , aux_data              :: term()
         , undet_timeout         :: integer()
         , fd_opts               :: term()
         , fd_scheduler          :: undefined | pid()
@@ -150,8 +151,8 @@ ctl_trace_send(#sandbox_opt{trace_send = Trace, aux_module = Aux, tracer_pid = T
     case {Trace, ?SHTABLE_GET(SHT, tracing)} of
         {true, {_, true}} ->
             case Aux =:= undefined
-                orelse not erlang:function_exported(Aux, ?MORPHEUS_CB_TRACE_SEND_FILTER_FN, 4)
-                orelse Aux:?MORPHEUS_CB_TRACE_SEND_FILTER(From, To, Type, Content) of
+                orelse not erlang:function_exported(Aux, ?MORPHEUS_CB_TRACE_SEND_FILTER_FN, 5)
+                orelse Aux:?MORPHEUS_CB_TRACE_SEND_FILTER(Opt#sandbox_opt.aux_data, From, To, Type, Content) of
                 true ->
                     ctl_trace_send_real(Opt, SHT, Where, From, To, Type, Content, Effect);
                 _ ->
@@ -178,8 +179,8 @@ ctl_trace_receive(#sandbox_opt{trace_receive = Trace, aux_module = Aux, tracer_p
     case {Trace, ?SHTABLE_GET(SHT, tracing)} of
         {true, {_, true}} ->
             case Aux =:= undefined
-                orelse not erlang:function_exported(Aux, ?MORPHEUS_CB_TRACE_RECEIVE_FILTER_FN, 3)
-                orelse Aux:?MORPHEUS_CB_TRACE_RECEIVE_FILTER(To, Type, Content) of
+                orelse not erlang:function_exported(Aux, ?MORPHEUS_CB_TRACE_RECEIVE_FILTER_FN, 4)
+                orelse Aux:?MORPHEUS_CB_TRACE_RECEIVE_FILTER(Opt#sandbox_opt.aux_data, To, Type, Content) of
                 true ->
                     ctl_trace_receive_real(Opt, SHT, Where, To, Type, Content);
                 _ ->
@@ -320,6 +321,7 @@ ctl_init(Opts) ->
           , scoped_weight         = proplists:get_value(scoped_weight, Opts, false)
           , heartbeat             = proplists:get_value(heartbeat, Opts, 10000)
           , aux_module            = proplists:get_value(aux_module, Opts, undefined)
+          , aux_data              = proplists:get_value(aux_data, Opts, undefined)
           , undet_timeout         = proplists:get_value(undet_timeout, Opts, 50)
           , fd_opts               = FdOpts
           , fd_scheduler          = FdSched
@@ -525,10 +527,10 @@ ctl_loop(S0) ->
             ctl_loop(S)
     end.
 
-fill_in_data(#sandbox_state{opt = #sandbox_opt{aux_module = Aux}}, Data, From, Req) ->
+fill_in_data(#sandbox_state{opt = #sandbox_opt{aux_module = Aux} = Opt}, Data, From, Req) ->
     D1 =
-        case (erlang:function_exported(Aux, ?MORPHEUS_CB_DELAY_LEVEL_FN, 1) andalso
-              Aux:?MORPHEUS_CB_DELAY_LEVEL(Req)) of
+        case (erlang:function_exported(Aux, ?MORPHEUS_CB_DELAY_LEVEL_FN, 2) andalso
+              Aux:?MORPHEUS_CB_DELAY_LEVEL(Opt#sandbox_opt.aux_data, Req)) of
             false ->
                 Data;
             L when is_integer(L) ->
@@ -700,7 +702,7 @@ ctl_check_and_receive(#sandbox_state{opt = Opt,
                                           andalso (not OnlySend orelse is_send_req(OriginReq))
                                           andalso ctl_call_to_delay(
                                                     Aux =:= undefined orelse
-                                                    not erlang:function_exported(Aux, ?MORPHEUS_CB_TO_DELAY_CALL_FN, 4),
+                                                    not erlang:function_exported(Aux, ?MORPHEUS_CB_TO_DELAY_CALL_FN, 5),
                                                     OriginReq),
                                       case ToSchedule of
                                           true ->
@@ -2037,8 +2039,8 @@ to_override(_, os, timestamp, 0) -> {true, callback};
 to_override(_, os, system_time, 0) -> {true, callback};
 to_override(_, os, system_time, 1) -> {true, callback};
 %% Regular case
-to_override(#sandbox_state{opt = #sandbox_opt{aux_module = Aux}}, M, F, A) ->
-    Aux =/= undefined andalso erlang:function_exported(Aux, ?MORPHEUS_CB_TO_OVERRIDE_FN, 3) andalso Aux:?MORPHEUS_CB_TO_OVERRIDE(M, F, A).
+to_override(#sandbox_state{opt = #sandbox_opt{aux_module = Aux, aux_data = Data}}, M, F, A) ->
+    Aux =/= undefined andalso erlang:function_exported(Aux, ?MORPHEUS_CB_TO_OVERRIDE_FN, 4) andalso Aux:?MORPHEUS_CB_TO_OVERRIDE(Data, M, F, A).
 
 %% Hack
 to_expose(_, erl_eval, exprs, 5) -> true;
@@ -2066,9 +2068,9 @@ handle(Old, New, Tag, Args, Ann) ->
     end,
     case ScopedWeight
         andalso Aux =/= undefined
-        andalso erlang:function_exported(Aux, ?MORPHEUS_CB_IS_SCOPED_FN, 1) of
+        andalso erlang:function_exported(Aux, ?MORPHEUS_CB_IS_SCOPED_FN, 2) of
         true ->
-            case Aux:?MORPHEUS_CB_IS_SCOPED(Old) of
+            case Aux:?MORPHEUS_CB_IS_SCOPED(Opt#sandbox_opt.aux_data, Old) of
                 true ->
                     case ?SHTABLE_GET(get_shtab(), {scoped_weight, self()}) of
                         {_, _} ->
@@ -2083,12 +2085,12 @@ handle(Old, New, Tag, Args, Ann) ->
             ok
     end,
     case Aux =/= undefined
-        andalso erlang:function_exported(Aux, ?MORPHEUS_CB_TO_DELAY_CALL_FN, 4)
+        andalso erlang:function_exported(Aux, ?MORPHEUS_CB_TO_DELAY_CALL_FN, 5)
         andalso Tag =:= call
          of
         true ->
             apply(fun (M, F, A) ->
-                          case Aux:?MORPHEUS_CB_TO_DELAY_CALL(Old, M, F, A) of
+                          case Aux:?MORPHEUS_CB_TO_DELAY_CALL(Opt#sandbox_opt.aux_data, Old, M, F, A) of
                               true ->
                                   call_ctl(get_ctl(), Ann, {delay});
                               {true, Log} ->
@@ -2130,7 +2132,7 @@ handle(Old, New, Tag, Args, Ann) ->
             end,
             handle(Old, New, call, [Old, Orig, A], Ann);
         {override, [callback, F, Orig, A]} ->
-            Aux:?MORPHEUS_CB_HANDLE_OVERRIDE(Old, New, F, Orig, A, Ann);
+            Aux:?MORPHEUS_CB_HANDLE_OVERRIDE(Opt#sandbox_opt.aux_data, Old, New, F, Orig, A, Ann);
         {undet_nif_stub, [F, A]} ->
             %% ?INFO("undet nif ~p:~p/~p", [Old, F, length(A)]),
             R = apply(Old, F, A),

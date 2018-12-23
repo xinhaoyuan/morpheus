@@ -1,18 +1,18 @@
 %% Aux module callback names. Made as macros to (sort of) separate CBs from regular functions.
 -define(MORPHEUS_CB_TRACE_SEND_FILTER_FN, '$morpheus$trace_send_filter').
--define(MORPHEUS_CB_TRACE_SEND_FILTER(From, To, Type, Content), ?MORPHEUS_CB_TRACE_SEND_FILTER_FN(From, To, Type, Content)).
+-define(MORPHEUS_CB_TRACE_SEND_FILTER(Data, From, To, Type, Content), ?MORPHEUS_CB_TRACE_SEND_FILTER_FN(Data, From, To, Type, Content)).
 -define(MORPHEUS_CB_TRACE_RECEIVE_FILTER_FN, '$morpheus$trace_receive_filter').
--define(MORPHEUS_CB_TRACE_RECEIVE_FILTER(To, Type, Content), ?MORPHEUS_CB_TRACE_RECEIVE_FILTER_FN(To, Type, Content)).
+-define(MORPHEUS_CB_TRACE_RECEIVE_FILTER(Data, To, Type, Content), ?MORPHEUS_CB_TRACE_RECEIVE_FILTER_FN(Data, To, Type, Content)).
 -define(MORPHEUS_CB_DELAY_LEVEL_FN, '$morpheus$delay_level').
--define(MORPHEUS_CB_DELAY_LEVEL(Req), ?MORPHEUS_CB_DELAY_LEVEL_FN(Req)).
+-define(MORPHEUS_CB_DELAY_LEVEL(Data, Req), ?MORPHEUS_CB_DELAY_LEVEL_FN(Data, Req)).
 -define(MORPHEUS_CB_TO_DELAY_CALL_FN, '$morpheus$to_delay_call').
--define(MORPHEUS_CB_TO_DELAY_CALL(FromMod, M, F, A), ?MORPHEUS_CB_TO_DELAY_CALL_FN(FromMod, M, F, A)).
+-define(MORPHEUS_CB_TO_DELAY_CALL(Data, FromMod, M, F, A), ?MORPHEUS_CB_TO_DELAY_CALL_FN(Data, FromMod, M, F, A)).
 -define(MORPHEUS_CB_TO_OVERRIDE_FN, '$morpheus$to_override').
--define(MORPHEUS_CB_TO_OVERRIDE(M, F, A), ?MORPHEUS_CB_TO_OVERRIDE_FN(M, F, A)).
+-define(MORPHEUS_CB_TO_OVERRIDE(Data, M, F, A), ?MORPHEUS_CB_TO_OVERRIDE_FN(Data, M, F, A)).
 -define(MORPHEUS_CB_IS_SCOPED_FN, '$morpheus$is_scoped').
--define(MORPHEUS_CB_IS_SCOPED(Mod), ?MORPHEUS_CB_IS_SCOPED_FN(Mod)).
+-define(MORPHEUS_CB_IS_SCOPED(Data, Mod), ?MORPHEUS_CB_IS_SCOPED_FN(Data, Mod)).
 -define(MORPHEUS_CB_HANDLE_OVERRIDE_FN, '$morpheus$handle_override').
--define(MORPHEUS_CB_HANDLE_OVERRIDE(Old, New, F, Orig, A, Ann), ?MORPHEUS_CB_HANDLE_OVERRIDE_FN(Old, New, F, Orig, A, Ann)).
+-define(MORPHEUS_CB_HANDLE_OVERRIDE(Data, Old, New, F, Orig, A, Ann), ?MORPHEUS_CB_HANDLE_OVERRIDE_FN(Data, Old, New, F, Orig, A, Ann)).
 
 %% ctl call tuples definition for avoiding mistakes.
 -define(cci_node_created(Node), {node_created, Node}).
@@ -48,5 +48,3 @@
 -define(cci_get_advice(), {get_advice}).
 -define(cci_guest_report_state(State), {guest_report_state, State}).
 -define(cci_log(Log), {log, Log}).
-
-
