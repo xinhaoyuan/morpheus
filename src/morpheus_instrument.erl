@@ -25,12 +25,22 @@ instrument_and_load(CtlMod, CtlState, OriginalModule, NewModule, Filename, Objec
     Core = get_core(ObjectCode),
     ?VERBOSE_DEBUG("~w: gonna instrument ~p", [?FUNCTION_NAME, Core]),
     _InstrResult = {{Original, Instrumented}, CtlState0, Nifs, Warnings} = instrument_core(CtlMod, CtlState, Core, OriginalModule, NewModule),
-    case Original of
-        undefined ->
-            {module, OriginalModule} = code:ensure_loaded(OriginalModule);
+    case Filename of
+        [] ->
+            case Original of
+                undefined ->
+                    code:load_binary(OriginalModule, [], ObjectCode);
+                _ ->
+                    load_module_from_core(OriginalModule, [], Original)
+            end;
         _ ->
-            ?DEBUG("Reload original module ~p", [OriginalModule]),
-            load_module_from_core(OriginalModule, Filename, Original)
+            case Original of
+                undefined ->
+                    {module, OriginalModule} = code:ensure_loaded(OriginalModule);
+                _ ->
+                    ?DEBUG("Reload original module ~p", [OriginalModule]),
+                    load_module_from_core(OriginalModule, Filename, Original)
+            end
     end,
     load_module_from_core(NewModule, Filename, Instrumented),
     {ok, CtlState0, Nifs, Warnings}.

@@ -112,7 +112,7 @@ Limitations
 
    Node failures can be (hopefully) simulated by killing/resetting applications on nodes.
 
- - Modules created in runtime are not supported yet. (e.g. lager doesn't work in sandbox)
+ - Limited support for modules created in runtime. Modules must be compiled with `debug_info`.
 
 Generally speaking, complete sandboxing is tricky and costly.
 There are potentially other holes that change application behaviors unexpectedly and produce false positives.

@@ -935,6 +935,19 @@ ctl_handle_call(#sandbox_state{mod_table = MT} = S,
                     error(cannot_instrument)
             end
     end;
+ctl_handle_call(#sandbox_state{mod_table = MT} = S,
+                _Where, ?cci_load_binary(_Node, M, B)) ->
+    case ?TABLE_GET(MT, M) of
+        undefined ->
+            NewM = list_to_atom("$M$" ++ pid_to_list(self()) ++ "$" ++ atom_to_list(M)),
+            {ok, S1, Nifs, _} =
+                morpheus_instrument:instrument_and_load(?MODULE, S, M, NewM, [], B),
+            NewMT = ?TABLE_SET(MT, M, {NewM, Nifs}),
+            {S1#sandbox_state{mod_table = NewMT}, ok};
+        _ ->
+            ?WARNING("Trying to load a previously loaded module ~w", [M]),
+            {S, badarg}
+    end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
                 _Where, {node_created, Node}) ->
     case ?TABLE_GET(PT, {node, Node}) of
@@ -2150,9 +2163,10 @@ handle(Old, New, Tag, Args, Ann) ->
                     ?WARNING("Unhandled apply fun ~p info ~p", [F, Other]),
                     error(apply_bad_fun)
             end;
-        {call, [code, load_binary, _A]} ->
-            ?WARNING("~w called unsupported function code:load_binary", [Old]),
-            {error, unsupported};
+        %% {call, [code, load_binary, _A]} ->
+        %%     [LBM, LBF | _] = _A,
+        %%     ?WARNING("~w called unsupported function code:load_binary(~w, ~w, ...)", [Old, LBM, LBF]),
+        %%     {error, unsupported};
         {call, [erlang, F, A]} ->
             handle_erlang(F, A, {Old, New, Ann});
         {call, [init, F, A]} ->
@@ -2860,6 +2874,16 @@ handle_erlang(get, [], _Aux) ->
                       [KV | Acc]
               end
       end, [], erlang:get());
+%% module loading will eventually reach here
+handle_erlang(load_module, [Mod, Bin], {_Old, _New, Ann}) ->
+    ?INFO("called erlang:load_module for module ~w", [Mod]),
+    {ok, Result} = call_ctl(get_ctl(), Ann, ?cci_load_binary(get_node(), Mod, Bin)),
+    case Result of
+        ok ->
+            {module, Mod};
+        badarg ->
+            {error, badarg}
+    end;
 handle_erlang(F, A, _Aux) ->
     apply(erlang, F, A).
 

@@ -20,6 +20,7 @@
 -define(cci_get_shtab(), {get_shtab}).
 -define(cci_initial_kick(), {initial_kick}).
 -define(cci_instrument_module(M), {instrument, M}).
+-define(cci_load_binary(Node, M, B), {load_binary, Node, M, B}).
 -define(cci_undet(), {undet}).
 -define(cci_send_msg(From, To, Msg), {process_send, From, To, Msg}).
 -define(cci_send_signal(From, To, Reason), {process_send_signal, From, To, Reason}).
