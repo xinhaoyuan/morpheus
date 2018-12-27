@@ -32,6 +32,7 @@
 
 -define(H, morpheus_helper).
 -define(T, morpheus_tracer).
+-define(I, morpheus_instrument).
 
 -define(LOCAL_NODE_NAME, 'nonode@nohost').
 
@@ -922,7 +923,7 @@ ctl_handle_call(#sandbox_state{mod_table = MT} = S,
                                    %% end;
                                {_, _, _} = _Result -> _Result
                            end,
-                       {ok, S1, Nifs, _} = morpheus_instrument:instrument_and_load(?MODULE, S, M, NewM, Filename, ObjectCode),
+                       {ok, S1, Nifs, _} = ?I:instrument_and_load(?MODULE, S, M, NewM, Filename, ObjectCode),
                        NewMT = ?TABLE_SET(MT, M, {NewM, Nifs}),
                        {S1#sandbox_state{mod_table = NewMT}, {NewM, Nifs}}
                    end)
@@ -941,7 +942,7 @@ ctl_handle_call(#sandbox_state{mod_table = MT} = S,
         undefined ->
             NewM = list_to_atom("$M$" ++ pid_to_list(self()) ++ "$" ++ atom_to_list(M)),
             {ok, S1, Nifs, _} =
-                morpheus_instrument:instrument_and_load(?MODULE, S, M, NewM, [], B),
+                ?I:instrument_and_load(?MODULE, S, M, NewM, [], B),
             NewMT = ?TABLE_SET(MT, M, {NewM, Nifs}),
             {S1#sandbox_state{mod_table = NewMT}, ok};
         _ ->
@@ -2212,9 +2213,9 @@ handle(Old, New, Tag, Args, Ann) ->
             apply(morpheus_guest_real, F, A);
         {call, [morpheus_guest_real, _F, _A]} ->
             ignored;
-        {call, [morpheus_sandbox, _F, _A]} ->
+        {call, [?MODULE, _F, _A]} ->
             ignored;
-        {call, [morpheus_instrument, _F, _A]} ->
+        {call, [?I, _F, _A]} ->
             ignored;
         {call, [Old, F, A]} ->
             apply(New, F, A);
@@ -2252,7 +2253,7 @@ handle(Old, New, Tag, Args, Ann) ->
 
 rewrite_call(Where, M, F, A) ->
     Arity = length(A),
-    case morpheus_instrument:whitelist_func(M, F, Arity) of
+    case ?I:whitelist_func(M, F, Arity) of
         true ->
             {M, F, A};
         false ->
