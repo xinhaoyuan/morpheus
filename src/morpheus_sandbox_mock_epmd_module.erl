@@ -17,9 +17,17 @@ stop() ->
 register_node(Name, Port) ->
     register_node(Name, Port, inet).
 
-register_node(_Name, _Port, _Family) ->
-    io:format(user, "EPMD: register_node(~w, ~w, ~w)~n", [_Name, _Port, _Family]),
-    {ok, rand:uniform(3)}.
+register_node(Name, Port, _Family) ->
+    Key = if
+              is_list(Name) ->
+                  {?MODULE, list_to_atom(Name)};
+              is_atom(Name) ->
+                  {?MODULE, Name}
+          end,
+    V = rand:uniform(3),
+    morpheus_guest:global_set(Key, {Port, V}),
+    io:format(user, "EPMD: register_node(~s, ~w, ~w) => {ok, ~w}~n", [Name, Port, _Family, V]),
+    {ok, V}.
 
 names(_Hostname) ->
     io:format(user, "EPMD: names(~w)~n", [_Hostname]),
@@ -28,6 +36,16 @@ names(_Hostname) ->
 port_please(Name, IP) ->
     port_please(Name, IP, infinity).
 
-port_please(_Name, _IP, _Timeout) ->
-    io:format(user, "EPMD: port_please(~w, ~w, ~w)~n", [_Name, _IP, _Timeout]),
-    noport.
+port_please(Name, _IP, _Timeout) ->
+    Key = if
+              is_list(Name) ->
+                  {?MODULE, list_to_atom(Name)};
+              is_atom(Name) ->
+                  {?MODULE, Name}
+          end,
+    R = case morpheus_guest:global_get(Key) of
+        error -> noport;
+        {ok, {Port, V}} -> {port, Port, V}
+    end,
+    io:format(user, "EPMD: port_please(~s, ~w, ~w) => ~w~n", [Name, _IP, _Timeout, R]),
+    R.

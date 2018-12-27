@@ -66,7 +66,7 @@ bootstrap() ->
 
 bootstrap(Node) ->
     bootstrap(),
-    {ok, _} = net_kernel:start([Node]).
+    {ok, _} = net_kernel:start([Node, shortnames]).
 
 bootstrap_remote(Node) ->
     Me = self(),
@@ -76,7 +76,7 @@ bootstrap_remote(Node) ->
 
 bootstrap_remote_entry(Parent, Ref, Node) ->
     bootstrap(),
-    {ok, _} = net_kernel:start([Node]),
+    {ok, _} = net_kernel:start([Node, shortnames]),
     Parent ! Ref,
     %% As the init process, it seems required to keep it alive ...
     receive after infinity -> ok end.

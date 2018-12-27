@@ -12,9 +12,12 @@
         , get_code_path/0
         , get_kernel_app/0
         , raw_apply/3
+        , global_get/1
+        , global_set/2
         ]).
 
 -include("morpheus.hrl").
+-include("morpheus_priv.hrl").
 
 -define(S, morpheus_sandbox).
 
@@ -66,3 +69,20 @@ get_kernel_app() ->
 
 raw_apply(M, F, A) ->
     erlang:apply(M, F, A).
+
+global_get(K) ->
+    Tab = ?S:get_shtab(),
+    RealK = {'$test_global', K},
+    GetResult = ?SHTABLE_GET(Tab, RealK),
+    case GetResult of
+        {_, V} ->
+            {ok, V};
+        undefined ->
+            error
+    end.
+
+global_set(K, V) ->
+    RealK = {'$test_global', K},
+    Tab = ?S:get_shtab(),
+    ?SHTABLE_REMOVE(Tab, RealK),
+    ?SHTABLE_SET(Tab, RealK, V).

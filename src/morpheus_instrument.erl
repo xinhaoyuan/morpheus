@@ -27,12 +27,8 @@ instrument_and_load(CtlMod, CtlState, OriginalModule, NewModule, Filename, Objec
     _InstrResult = {{Original, Instrumented}, CtlState0, Nifs, Warnings} = instrument_core(CtlMod, CtlState, Core, OriginalModule, NewModule),
     case Filename of
         [] ->
-            case Original of
-                undefined ->
-                    code:load_binary(OriginalModule, [], ObjectCode);
-                _ ->
-                    load_module_from_core(OriginalModule, [], Original)
-            end;
+            %% empty filename indicate dynamic module. So far there is no good way of handling that.
+            ok;
         _ ->
             case Original of
                 undefined ->

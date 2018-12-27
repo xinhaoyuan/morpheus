@@ -12,6 +12,8 @@
         , get_kernel_app/0
         , raw_apply/3
         , log/1
+        , global_get/1
+        , global_set/2
         ]).
 
 call_ctl(_Args) ->
@@ -48,4 +50,10 @@ raw_apply(_M, _F, _A) ->
     error(not_in_sandbox).
 
 log(_L) ->
+    error(not_in_sandbox).
+
+global_get(_K) ->
+    error(not_in_sandbox).
+
+global_set(_K, _V) ->
     error(not_in_sandbox).

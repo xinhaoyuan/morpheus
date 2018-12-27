@@ -146,7 +146,7 @@ timer_loop(S, Now) ->
         {Ref, Pid, {read, TRef, Async}} ->
             Now0 = erlang:monotonic_time(millisecond),
             R =
-                case lists:keysearch(#timer_entry.ref, TRef, Timers) of
+                case lists:keysearch(TRef, #timer_entry.ref, Timers) of
                     {value, #timer_entry{deadline = DL}} when DL < Now0 ->
                         DL - Now0;
                     _ ->
@@ -156,7 +156,7 @@ timer_loop(S, Now) ->
                 true ->
                     Pid ! {read_timer, TRef, R};
                 false ->
-                    Pid ! {Ref, {read_timer, TRef, R}}
+                    Pid ! {Ref, R}
             end,
             timer_loop(S, Now0);
         {'DOWN', _, process, Pid, _} ->

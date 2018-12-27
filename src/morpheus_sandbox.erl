@@ -7,6 +7,7 @@
 %% For client api
 -export([ get_ctl/0
         , get_node/0
+        , get_shtab/0
         , call_ctl/3
         , cast_ctl/2
         , start_node/4
@@ -946,8 +947,9 @@ ctl_handle_call(#sandbox_state{mod_table = MT} = S,
             NewMT = ?TABLE_SET(MT, M, {NewM, Nifs}),
             {S1#sandbox_state{mod_table = NewMT}, ok};
         _ ->
-            ?WARNING("Trying to load a previously loaded module ~w", [M]),
-            {S, badarg}
+            ?WARNING("Trying to load a previously loaded module ~w~n"
+                     "  return ok anyway ...", [M]),
+            {S, ok}
     end;
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
                 _Where, {node_created, Node}) ->
@@ -2168,6 +2170,9 @@ handle(Old, New, Tag, Args, Ann) ->
         %%     [LBM, LBF | _] = _A,
         %%     ?WARNING("~w called unsupported function code:load_binary(~w, ~w, ...)", [Old, LBM, LBF]),
         %%     {error, unsupported};
+        {call, [code, purge, A]} ->
+            ?INFO("ignored code:purge ~p", [A]),
+            true;
         {call, [erlang, F, A]} ->
             handle_erlang(F, A, {Old, New, Ann});
         {call, [init, F, A]} ->
