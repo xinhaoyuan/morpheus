@@ -23,14 +23,6 @@ t_basic() ->
 -define(GH, morpheus_guest_helper).
 -define(G, morpheus_guest).
 
-do_recv(Sock, Bs) ->
-    case gen_tcp:recv(Sock, 0) of
-        {ok, B} ->
-            do_recv(Sock, [Bs, B]);
-        {error, closed} ->
-            {ok, list_to_binary(Bs)}
-    end.
-
 basic_test_entry() ->
     ?GH:bootstrap(),
     %% passive recv
@@ -40,7 +32,15 @@ basic_test_entry() ->
                  {ok, LSock} = gen_tcp:listen(29999, [binary, {packet, 0},
                                                       {active, false}]),
                  {ok, Sock} = gen_tcp:accept(LSock),
-                 {ok, Bin} = do_recv(Sock, []),
+                 Bin =
+                     (fun F(BinList) ->
+                              case gen_tcp:recv(Sock, 0) of
+                                  {ok, X} ->
+                                      F([X | BinList]);
+                                  {error, closed} ->
+                                      list_to_binary(lists:reverse(BinList))
+                              end
+                      end)([]),
                  ok = gen_tcp:close(Sock),
                  ok = gen_tcp:close(LSock),
                  io:format(user, "Recv ~p~n", [Bin])
