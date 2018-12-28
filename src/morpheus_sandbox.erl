@@ -2235,6 +2235,10 @@ handle(Old, New, Tag, Args, Ann) ->
                     error(timeout_value)
             end,
             Ctl = get_ctl(),
+            %% This might look ugly and potentially problematic.
+            %% Idealy any undet message should be handled and queued when it is produced, but doing that is tricky. {{
+            handle_undet_message(Ctl, Ann),
+            handle_signals(Ann),
             case call_ctl(Ctl, Ann, {undet_barrier}) of
                 {ok, true} ->
                     handle_undet_message(Ctl, Ann),
@@ -2242,6 +2246,7 @@ handle(Old, New, Tag, Args, Ann) ->
                 {ok, false} ->
                     ok
             end,
+            %% }}
             {ok, Ref} = ?cc_process_receive(Ctl, Ann, self(), PatFun, Timeout),
             R = handle_receive(Ctl, Ann, Ref),
             case R of
