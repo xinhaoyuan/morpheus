@@ -38,7 +38,7 @@ init() ->
 event(E) ->
     io:format(user, "!!! ~p~n", [E]).
 -else.
-event(E) ->
+event(_E) ->
     ok.
 -endif.
 
