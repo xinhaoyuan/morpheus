@@ -11,6 +11,7 @@
         , cancel_timer/1, cancel_timer/2
         ]).
 
+
 %% called once in the startup thread of the sandbox
 init() ->
     init_timer(),
@@ -29,6 +30,17 @@ init() ->
         { timers   :: [#timer_entry{}]
         , monitors :: dict:dict(pid(), {non_neg_integer(), reference()})
         }).
+
+%% -define(DEBUG, true).
+
+-compile({inline, [event/1]}).
+-ifdef(DEBUG).
+event(E) ->
+    io:format(user, "!!! ~p~n", [E]).
+-else.
+event(E) ->
+    ok.
+-endif.
 
 init_timer() ->
     Me = self(),
@@ -63,6 +75,7 @@ process_timeouts(#timer_state{timers = Timers0, monitors = Monitors0}, Now) ->
     Monitors = lists:foldr(
       fun ( #timer_entry{dest = Dest, ref = Ref, msg = Msg, with_header = WithHeader}
           , CurMonitors) ->
+              event({timer_expired, Ref}),
               %% Dest may be a non-exist process name. By API documentation it's silently ignored
               _ = (catch
                        case WithHeader of
@@ -97,6 +110,7 @@ timer_loop(S, Now) ->
         {Ref, Pid, {new, Abs, Time, Dest, Msg, WithHeader}} ->
             Now0 = erlang:monotonic_time(millisecond),
             TRef = make_ref(),
+            event({new_timer, Time, TRef}),
             Timer = #timer_entry{ deadline = case Abs of
                                                  true ->
                                                      Time;
@@ -121,6 +135,7 @@ timer_loop(S, Now) ->
             Pid ! {Ref, TRef},
             timer_loop(S#timer_state{timers = [Timer | Timers], monitors = Monitors1}, Now0);
         {Ref, Pid, {cancel, TRef, Async}} ->
+            event({cancel_timer, TRef}),
             Now0 = erlang:monotonic_time(millisecond),
             {R, Dest, NewTimers} =
                 lists:foldr(fun (#timer_entry{deadline = DL, dest = Dest, ref = TRef0}, {_F, _D, L})
@@ -153,13 +168,20 @@ timer_loop(S, Now) ->
             timer_loop(S#timer_state{timers = NewTimers, monitors = Monitors1}, Now0);
         {Ref, Pid, {read, TRef, Async}} ->
             Now0 = erlang:monotonic_time(millisecond),
-            R =
+            {Info, R} =
                 case lists:keysearch(TRef, #timer_entry.ref, Timers) of
-                    {value, #timer_entry{deadline = DL}} when DL < Now0 ->
-                        DL - Now0;
+                    {value, #timer_entry{deadline = DL}} ->
+                        case DL > Now0 of
+                            true ->
+                                {found, DL - Now0};
+                            false ->
+                                %% this should not happen ... but anyway
+                                {expired, false}
+                        end;
                     _ ->
-                        false
+                        {not_found, false}
                 end,
+            event({read_timer, TRef, Timers, Now0, {Info, R}}),
             case Async of
                 true ->
                     Pid ! {read_timer, TRef, R};
