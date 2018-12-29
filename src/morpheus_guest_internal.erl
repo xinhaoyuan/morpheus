@@ -20,7 +20,7 @@ init() ->
 
 -record(timer_entry,
         { deadline    :: integer()
-        , pid         :: pid()
+        , dest        :: pid() | atom()
         , ref         :: reference()
         , msg         :: any()
         , with_header :: boolean()
@@ -61,21 +61,24 @@ process_timeouts(#timer_state{timers = Timers0, monitors = Monitors0}, Now) ->
           end, {[], [], infinity}, Timers0),
     %% XXX shuffle the expired list to fire them randomly?
     Monitors = lists:foldr(
-      fun ( #timer_entry{pid = Pid, ref = Ref, msg = Msg, with_header = WithHeader}
+      fun ( #timer_entry{dest = Dest, ref = Ref, msg = Msg, with_header = WithHeader}
           , CurMonitors) ->
+              %% Dest may be a non-exist process name. By API documentation it's silently ignored
               _ = (catch
                        case WithHeader of
                            true ->
-                               Pid ! {timeout, Ref, Msg};
+                               Dest ! {timeout, Ref, Msg};
                            false ->
-                               Pid ! Msg
+                               Dest ! Msg
                        end),
-              case dict:take(Pid, CurMonitors) of
+              case is_pid(Dest) andalso dict:take(Dest, CurMonitors) of
+                  false ->
+                      CurMonitors;
                   {{C, MRef}, NxMonitors} when C =:= 1 ->
                       demonitor(MRef, [flush]),
                       NxMonitors;
                   {{C, MRef}, NxMonitors} when C > 1 ->
-                      dict:store(Pid, {C - 1, MRef}, NxMonitors)
+                      dict:store(Dest, {C - 1, MRef}, NxMonitors)
               end
       end, Monitors0, Expired),
     {Timers, Monitors, NextDeadline}.
@@ -100,13 +103,15 @@ timer_loop(S, Now) ->
                                                  false ->
                                                      Now0 + Time
                                              end
-                                , pid = Dest
+                                , dest = Dest
                                 , ref = TRef
                                 , msg = Msg
                                 , with_header = WithHeader
                                 },
             Monitors1 =
-                case dict:take(Dest, Monitors) of
+                case is_pid(Dest) andalso dict:take(Dest, Monitors) of
+                    false ->
+                        Monitors;
                     {{C, MRef}, _M} ->
                         dict:store(Dest, {C + 1, MRef}, _M);
                     error ->
@@ -118,7 +123,7 @@ timer_loop(S, Now) ->
         {Ref, Pid, {cancel, TRef, Async}} ->
             Now0 = erlang:monotonic_time(millisecond),
             {R, Dest, NewTimers} =
-                lists:foldr(fun (#timer_entry{deadline = DL, pid = Dest, ref = TRef0}, {_F, _D, L})
+                lists:foldr(fun (#timer_entry{deadline = DL, dest = Dest, ref = TRef0}, {_F, _D, L})
                                   when TRef0 =:= TRef ->
                                     {DL - Now0, Dest, L};
                                 (Timeout, {F, D, L}) ->
@@ -135,7 +140,9 @@ timer_loop(S, Now) ->
                     undefined ->
                         Monitors;
                     _ ->
-                        case dict:take(Dest, Monitors) of
+                        case is_pid(Dest) andalso dict:take(Dest, Monitors) of
+                            false ->
+                                Monitors;
                             {{C, MRef}, NxM} when C =:= 1 ->
                                 demonitor(MRef, [flush]),
                                 NxM;
@@ -163,7 +170,7 @@ timer_loop(S, Now) ->
         {'DOWN', _, process, Pid, _} ->
             Now0 = erlang:monotonic_time(millisecond),
             Timers1 = lists:foldr(
-                        fun (#timer_entry{pid = Dest} = TE, Acc) ->
+                        fun (#timer_entry{dest = Dest} = TE, Acc) ->
                                 case Dest =:= Pid of
                                     true ->
                                         Acc;
