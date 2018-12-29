@@ -63,12 +63,13 @@ process_timeouts(#timer_state{timers = Timers0, monitors = Monitors0}, Now) ->
     Monitors = lists:foldr(
       fun ( #timer_entry{pid = Pid, ref = Ref, msg = Msg, with_header = WithHeader}
           , CurMonitors) ->
-              case WithHeader of
-                  true ->
-                      Pid ! {timeout, Ref, Msg};
-                  false ->
-                      Pid ! Msg
-              end,
+              _ = (catch
+                       case WithHeader of
+                           true ->
+                               Pid ! {timeout, Ref, Msg};
+                           false ->
+                               Pid ! Msg
+                       end),
               case dict:take(Pid, CurMonitors) of
                   {{C, MRef}, NxMonitors} when C =:= 1 ->
                       demonitor(MRef, [flush]),
@@ -197,7 +198,7 @@ start_timer(Time, Dest, Msg, Opts, WithHeader) ->
           end,
     case whereis(?MODULE) of
         undefined ->
-            error(timer_controller_not_found);
+            morpheus_guest:exit_with(timer_controller_not_found);
         Pid ->
             MRef = monitor(process, Pid),
             Pid ! {MRef, self(), {new, Abs, Time, Dest, Msg, WithHeader}},
@@ -206,7 +207,7 @@ start_timer(Time, Dest, Msg, Opts, WithHeader) ->
                     demonitor(MRef, [flush]),
                     TRef;
                 {'DOWN', MRef, _, _, _} ->
-                    error(timer_controller_down)
+                    morpheus_guest:exit_with(timer_controller_down)
             end
     end.
 

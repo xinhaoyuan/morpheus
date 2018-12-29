@@ -57,6 +57,8 @@
              _ -> false
          end)).
 
+-define(MSG_FORMAT_CHARS_LIMIT, 80).
+
 -type abs_id() :: integer().
 
 -record(sandbox_opt,
@@ -243,6 +245,7 @@ ctl_trace_new_process(#sandbox_opt{trace_send = TSend, trace_receive = TRecv, tr
 %% {linking, PID} -> [PID]
 %% {reg, Node, Name} -> {proc, PID} | {external_proc, PID} | {port_agent, PID}
 %% {name, PID} -> {Node, Name}
+%% {receive_status, PID} -> prepared | {Ref, PatFun, Deadline}
 %% {node_procs, Node} -> [PID]
 %% {node, Node} -> {online|offline, dict:dict()}
 %% online_nodes -> [NodeId]
@@ -455,15 +458,17 @@ ctl_loop(S0) ->
                 andalso dict:find(Pid, AIDT) of
                 {ok, Aid} ->
                     case Req of
-                        %% Special handling of undet_barrier -- only buffer when there is any undet signal
-                        {undet_barrier} when S#sandbox_state.undet_signals > 0 ->
+                        %% Special handling of receive_prepare -- only buffer when there is any undet signal
+                        {receive_prepare, RecvPid} when S#sandbox_state.undet_signals > 0 ->
+                            RecvPid = Pid,
                             case ToTrace of
-                                true -> ?INFO("delay undet_barrier ~p", [Req]);
+                                true -> ?INFO("delay receive_prepare ~p", [Req]);
                                 false -> ok
                             end,
-                            ctl_loop(ctl_push_request_to_buffer(S, #{where => Where}, Aid, Pid, Ref, {undet_barrier, true}));
-                        {undet_barrier} ->
-                            ctl_loop(ctl_loop_call(S, Where, ToTrace, Pid, Ref, {undet_barrier, false}));
+                            %% According to call_to_delay(...), this request will run as long as undet waiting is done.
+                            ctl_loop(ctl_push_request_to_buffer(S, #{where => Where}, Aid, Pid, Ref, {receive_prepare, RecvPid, true}));
+                        {receive_prepare, RecvPid} ->
+                            ctl_loop(ctl_loop_call(S, Where, ToTrace, Pid, Ref, {receive_prepare, RecvPid, false}));
                         {undet, _} ->
                             case ToTrace of
                                 true -> ?INFO("delay undet resp ~p", [Req]);
@@ -780,7 +785,7 @@ is_send_req(_) -> false.
 ctl_call_to_delay(true, {nodelay, _}) -> false;
 ctl_call_to_delay(true, ?cci_undet()) -> false;
 ctl_call_to_delay(true, {undet, _}) -> false;
-ctl_call_to_delay(true, {undet_barrier, _}) -> false;
+ctl_call_to_delay(true, {receive_prepare, _, _}) -> false;
 ctl_call_to_delay(true, ?cci_initial_kick()) -> false;
 ctl_call_to_delay(true, ?cci_get_shtab()) -> false;
 ctl_call_to_delay(true, ?cci_get_opt()) -> false;
@@ -861,9 +866,21 @@ ctl_handle_call(#sandbox_state{undet_signals = UndetSigs} = S,
 ctl_handle_call(#sandbox_state{undet_signals = UndetSigs} = S,
                 Where, {undet, R}) ->
     ctl_handle_call(S#sandbox_state{undet_signals = UndetSigs + 1}, Where, R);
-ctl_handle_call(S, _Where, {undet_barrier, Result}) ->
-    %% The result is written in push_req
-    {S, Result};
+ctl_handle_call(#sandbox_state{proc_table = PT} = S, _Where, {receive_prepare, Pid, _Waited}) ->
+    %% Waited is written in push_req
+    %% Temporary code
+    %% {R, PT1} =
+    %%     case ?TABLE_GET(PT, {receive_status, Pid}) of
+    %%         undefined ->
+    %%             {0, PT};
+    %%         {_, {forwarded_counter, C}} ->
+    %%             {message_queue_len, QL} = erlang:process_info(Pid, message_queue_len),
+    %%             ?INFO("??? ~w ~w", [QL, C]),
+    %%             {C, ?TABLE_REMOVE(PT, {receive_status, Pid})}
+    %%     end,
+    %% PT2 = ?TABLE_SET(PT1, {receive_status, Pid}, prepared),
+    %% {S#sandbox_state{proc_table = PT2}, R};
+    {S#sandbox_state{proc_table = ?TABLE_SET(PT, {receive_status, Pid}, prepared)}, _Waited};
 % internal use only
 ctl_handle_call(#sandbox_state{transient_counter = TC} = S,
                 _Where, {become_persistent, _Proc}) ->
@@ -1316,10 +1333,11 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
     end;
 ctl_handle_call(#sandbox_state{ opt = _Opt
                               , abs_id_table = _AIDT
-                              , proc_table = PT
+                              , proc_table = PT0
                               , proc_shtable = SHT
                               , alive_counter = AC} = S,
                 _Where, ?cci_process_receive(Proc, PatFun, Timeout)) ->
+    PT = ?TABLE_REMOVE(PT0, {receive_status, Proc}),
     Ref = make_ref(),
     case ?SHTABLE_GET(SHT, {exit, Proc}) of
         undefined ->
@@ -1345,8 +1363,8 @@ ctl_handle_call(#sandbox_state{ opt = _Opt
                             Proc ! {Ref, timeout},
                             {S, Ref};
                         infinity ->
-                            PT0 = ?TABLE_SET(PT, {receive_status, Proc}, {Ref, PatFun0, infinity}),
-                            {S#sandbox_state{proc_table = PT0, 
+                            PT1 = ?TABLE_SET(PT, {receive_status, Proc}, {Ref, PatFun0, infinity}),
+                            {S#sandbox_state{proc_table = PT1,
                                              alive = S#sandbox_state.alive -- [Proc],
                                              alive_counter = AC - 1}, Ref};
                         _ when is_integer(Timeout), Timeout > 0 ->
@@ -1355,8 +1373,8 @@ ctl_handle_call(#sandbox_state{ opt = _Opt
                             if
                                 S#sandbox_state.opt#sandbox_opt.control_timeouts,
                                 Deadline >= S#sandbox_state.vclock_limit ->
-                                    PT0 = ?TABLE_SET(PT, {receive_status, Proc}, {Ref, PatFun0, infinity}),
-                                    {S#sandbox_state{proc_table = PT0,
+                                    PT1 = ?TABLE_SET(PT, {receive_status, Proc}, {Ref, PatFun0, infinity}),
+                                    {S#sandbox_state{proc_table = PT1,
                                                      alive = S#sandbox_state.alive -- [Proc],
                                                      alive_counter = AC - 1}, Ref};
                                 true ->
@@ -1373,17 +1391,17 @@ ctl_handle_call(#sandbox_state{ opt = _Opt
                                                 erlang:send_after(Timeout, self(), {cast, {receive_timeout, Proc, Ref}}),
                                                 S
                                         end,
-                                    PT0 = ?TABLE_SET(PT, {receive_status, Proc}, {Ref, PatFun0, Deadline}),
-                                    {S1#sandbox_state{proc_table = PT0, 
+                                    PT1 = ?TABLE_SET(PT, {receive_status, Proc}, {Ref, PatFun0, Deadline}),
+                                    {S1#sandbox_state{proc_table = PT1, 
                                                       alive = S#sandbox_state.alive -- [Proc], alive_counter = AC - 1,
                                                       timeouts_counter = TimeoutsC + 1}, Ref}
                             end
                     end;
                 {found, Pos} ->
                     {M, NewMsgQueue} = ?H:take_nth(Pos, MsgQueue),
-                    PT0 = ?TABLE_SET(PT, {msg_queue, Proc}, NewMsgQueue),
+                    PT1 = ?TABLE_SET(PT, {msg_queue, Proc}, NewMsgQueue),
                     Proc ! {Ref, [message | M]},
-                    {S#sandbox_state{proc_table = PT0}, Ref}
+                    {S#sandbox_state{proc_table = PT1}, Ref}
             end;
         _ ->
             Proc ! {Ref, signal},
@@ -1766,12 +1784,13 @@ ctl_handle_cast( #sandbox_state{ proc_table = PT
               timeouts_counter = TimeoutsC - 1,
               vclock = if
                            Clock < Timeout ->
+                               ?INFO("clock advanced to ~w", [Timeout]),
                                Timeout;
                            true -> Clock
                        end
              };
         _ ->
-            %% nothing needs done as receive is already passed
+            %% nothing needs done as the matched receive is already passed
             S
     end;
 ctl_handle_cast( #sandbox_state{ opt = #sandbox_opt{ time_uncertainty = TUC }
@@ -1860,6 +1879,38 @@ ctl_process_send( #sandbox_state
             {_, MsgQueue} ->
                 case ?TABLE_GET(PT, {receive_status, Proc}) of
                     undefined ->
+                        %% Temporary code
+                        %% {message_queue_len, QL} = erlang:process_info(Proc, message_queue_len),
+                        %% {Msgs, PT1} =
+                        %%     case QL > 0 of
+                        %%         true ->
+                        %%             {messages, Q} = erlang:process_info(Proc, messages),
+                        %%             ?INFO("forward undet messages of ~w~n"
+                        %%                   "  ~p",
+                        %%                   [Proc, Q]),
+                        %%             {[Msg | lists:reverse(Q)], ?TABLE_SET(PT, {receive_status, Proc}, {forwarded_counter, QL})};
+                        %%         false ->
+                        %%             {[Msg], PT}
+                        %%     end,
+                        %% {S#sandbox_state{proc_table = ?TABLE_SET(PT1, {msg_queue, Proc}, Msgs ++ MsgQueue)}, ok, queued};
+                        {S#sandbox_state{proc_table = ?TABLE_SET(PT, {msg_queue, Proc}, [Msg | MsgQueue])}, ok, queued};
+                    %% {_, {forwarded_counter, C}} ->
+                    %%     {message_queue_len, QL} = erlang:process_info(Proc, message_queue_len),
+                    %%     {Msgs, PT1} =
+                    %%         case QL > C of
+                    %%             true ->
+                    %%                 {messages, FullQ} = erlang:process_info(Proc, messages),
+                    %%                 Q = lists:sublist(FullQ, C + 1, QL - C),
+                    %%                 ?INFO("forward undet messages of ~w~n"
+                    %%                       "  ~p",
+                    %%                       [Proc, Q]),
+                    %%                 {[Msg | lists:reverse(Q)], ?TABLE_SET(PT, {receive_status, Proc}, {forwarded_counter, QL})};
+                    %%             false ->
+                    %%                 {[Msg], PT}
+                    %%         end,
+                    %%     {S#sandbox_state{proc_table = ?TABLE_SET(PT1, {msg_queue, Proc}, Msgs ++ MsgQueue)}, ok, queued};
+                    {_, prepared} ->
+                        %% XXX Do we want to send directly to the process so it synchonized with the proc msg queue with undet message?
                         {S#sandbox_state{proc_table = ?TABLE_SET(PT, {msg_queue, Proc}, [Msg | MsgQueue])}, ok, queued};
                     {_, {Ref, PatFun, _Timeout}} ->
                         case PatFun(Msg) of
@@ -1907,6 +1958,8 @@ ctl_process_send_signal( #sandbox_state
             case ?TABLE_GET(PT, {receive_status, Proc}) of
                 undefined ->
                     %% signal will be handled once back to `handle`
+                    {S, ok};
+                {_, prepared} ->
                     {S, ok};
                 {_, {Ref, _PatFun, _Timeout}} ->
                     Proc ! {Ref, signal},
@@ -2235,20 +2288,26 @@ handle(Old, New, Tag, Args, Ann) ->
                     error(timeout_value)
             end,
             Ctl = get_ctl(),
-            %% This might look ugly and potentially problematic.
-            %% Idealy any undet message should be handled and queued when it is produced, but doing that is tricky. {{
+            _ = call_ctl(Ctl, Ann, {receive_prepare, self()}),
+            %% From now on, until ctl returns a message, the message queue is locked
+            %% Temporary code
+            %% (fun F(N) ->
+            %%          case N > 0 of
+            %%              true ->
+            %%                  receive
+            %%                      _ -> F(N - 1)
+            %%                  after
+            %%                      0 -> ?WARNING("unexpected end of messages??? expected length: ~w, now ~w", [NMsgToOmit, NMsgToOmit - N])
+            %%                  end;
+            %%              false ->
+            %%                  ok
+            %%          end
+            %%  end)(NMsgToOmit),
             handle_undet_message(Ctl, Ann),
             handle_signals(Ann),
-            case call_ctl(Ctl, Ann, {undet_barrier}) of
-                {ok, true} ->
-                    handle_undet_message(Ctl, Ann),
-                    handle_signals(Ann);
-                {ok, false} ->
-                    ok
-            end,
-            %% }}
             {ok, Ref} = ?cc_process_receive(Ctl, Ann, self(), PatFun, Timeout),
             R = handle_receive(Ctl, Ann, Ref),
+            %% Now the message queue is unlocked
             case R of
                 signal ->
                     handle_signals(Ann);
@@ -2278,7 +2337,8 @@ handle_undet_message(Ctl, Where) ->
             %% ignore redundant internal give_away message
             handle_undet_message(Ctl, Where);
         M ->
-            ?INFO("~p got external message before blocking:~n  ~p", [self(), M]),
+            MsgStr = lists:flatten(io_lib:write(M, [{chars_limit, ?MSG_FORMAT_CHARS_LIMIT}])),
+            ?INFO("~p got external message before blocking:~n  ~s", [self(), MsgStr]),
             %% At this moment, undet timeout is off, and this process is considered alive.
             %% we do not need to use {undet, ...} request to activate it again
             ?cc_send_msg(Ctl, Where, undet, self(), M),
@@ -2296,7 +2356,8 @@ handle_receive(Ctl, Where, Ref) ->
             %% ignore redundant internal give_away message
             handle_receive(Ctl, Where, Ref);
         M ->
-            ?INFO("~p received external message while blocking:~n  ~p", [self(), M]),
+            MsgStr = lists:flatten(io_lib:write(M, [{chars_limit, ?MSG_FORMAT_CHARS_LIMIT}])),
+            ?INFO("~p received external message while blocking:~n  ~s", [self(), MsgStr]),
             ?cc_undet_send_msg(Ctl, Where, undet, self(), M),
             handle_receive(Ctl, Where, Ref)
     end.
@@ -2490,7 +2551,8 @@ handle_erlang(send, [Pid, M], {_Old, _New, Ann}) when is_pid(Pid) ->
         ok ->
             M;
         external ->
-            ?WARNING("Ignored external message ~p to ~p", [M, Pid]),
+            MsgStr = lists:flatten(io_lib:write(M, [{chars_limit, ?MSG_FORMAT_CHARS_LIMIT}])),
+            ?WARNING("Ignored external message ~p to ~s", [MsgStr, Pid]),
             M
     end;
 handle_erlang(send, [Pid, M, _Opts], Aux) when is_pid(Pid) ->
