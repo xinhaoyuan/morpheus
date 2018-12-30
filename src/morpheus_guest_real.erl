@@ -14,6 +14,7 @@
         , raw_apply/3
         , global_get/1
         , global_set/2
+        , global_remove/1
         ]).
 
 -include("morpheus.hrl").
@@ -76,7 +77,7 @@ global_get(K) ->
     GetResult = ?SHTABLE_GET(Tab, RealK),
     case GetResult of
         {_, V} ->
-            {ok, V};
+            {value, V};
         undefined ->
             error
     end.
@@ -86,3 +87,8 @@ global_set(K, V) ->
     Tab = ?S:get_shtab(),
     ?SHTABLE_REMOVE(Tab, RealK),
     ?SHTABLE_SET(Tab, RealK, V).
+
+global_remove(K) ->
+    RealK = {'$test_global', K},
+    Tab = ?S:get_shtab(),
+    ?SHTABLE_REMOVE(Tab, RealK).

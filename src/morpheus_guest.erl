@@ -14,6 +14,7 @@
         , log/1
         , global_get/1
         , global_set/2
+        , global_remove/1
         ]).
 
 call_ctl(_Args) ->
@@ -56,4 +57,7 @@ global_get(_K) ->
     error(not_in_sandbox).
 
 global_set(_K, _V) ->
+    error(not_in_sandbox).
+
+global_remove(_K) ->
     error(not_in_sandbox).

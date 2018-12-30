@@ -57,7 +57,7 @@ port_please(Name, _IP, _Timeout) ->
           end,
     R = case morpheus_guest:global_get(Key) of
         error -> noport;
-        {ok, {Port, V}} -> {port, Port, V}
+        {value, {Port, V}} -> {port, Port, V}
     end,
     io:format(user, "EPMD: port_please(~s, ~w, ~w) => ~w~n", [Name, _IP, _Timeout, R]),
     R.
