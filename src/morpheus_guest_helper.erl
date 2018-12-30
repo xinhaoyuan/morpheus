@@ -94,7 +94,7 @@ async_task([seq, H | R]) ->
                fun () ->
                        lists:foreach(fun (T) ->
                                              M = async_task(T),
-                                             receive {'DOWN', M, _, _, _} -> ok end
+                                             receive {'DOWN', M, _, _, Reason} -> Reason = normal end
                                      end, [H | R])
                end),
     M;
@@ -107,7 +107,7 @@ async_task([par, H | R]) ->
                                                 [async_task(T) | Acc]
                                         end, [], [H | R]),
                        lists:foreach(fun (M) ->
-                                             receive {'DOWN', M, _, _, _} -> ok end
+                                             receive {'DOWN', M, _, _, Reason} -> Reason = normal end
                                      end, Ms)
                end),
     M;
@@ -117,7 +117,7 @@ async_task([par_map, C, T]) ->
                        Ms = while(fun (N) -> if N < C -> {true, N + 1}; true -> false end end, 0,
                                   fun (L) -> [async_task(T) | L] end, []),
                        lists:foreach(fun (M) ->
-                                             receive {'DOWN', M, _, _, _} -> ok end
+                                             receive {'DOWN', M, _, _, Reason} -> Reason = normal end
                                      end, Ms)
                end),
     M;
@@ -148,7 +148,7 @@ sync_task([repeat, Times, Body]) ->
     do_loop_sync(fun (N) -> if N < Times -> {true, N + 1}; true -> false end end, 0, Body);
 sync_task(T) ->
     M = async_task(T),
-    receive {'DOWN', M, _, _, _} -> ok end.
+    receive {'DOWN', M, _, _, Reason} -> Reason = normal end.
 
 while(Cond, State, Body, Acc) ->
     case Cond(State) of
