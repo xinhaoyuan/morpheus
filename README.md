@@ -104,7 +104,7 @@ Limitations
 
    Patches are in otp-patches (so far only for OTP-{20,21}).
 
- - External inputs (i.e. ports and NIFs) need to be deterministic given the control of the erlang program.
+ - External I/O (e.g. ports and NIFs) need to be deterministic given the control of the erlang program.
 
    For example, we don't support ports that send back random numbers.
 
