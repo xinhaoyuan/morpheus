@@ -21,7 +21,7 @@ We use the term `host` to refer the program running outside of the sandbox and `
 
 All usage of Morpheus starts with the call
 ```erlang
-morpheus:start(module(), atom(), arity(), [property()]) -> pid() | {pid(), reference()}
+morpheus:start(module(), atom(), [term()], [option()]) -> pid() | {pid(), reference()}
 ```
 which takes the entry function of the sandbox and startup options, and returns the pid of the controller process (with a monitor link if the `monitor` option is proveided).
 
