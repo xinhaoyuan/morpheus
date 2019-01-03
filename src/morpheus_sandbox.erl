@@ -869,19 +869,17 @@ ctl_handle_call(#sandbox_state{undet_signals = UndetSigs} = S,
     ctl_handle_call(S#sandbox_state{undet_signals = UndetSigs + 1}, Where, R);
 ctl_handle_call(#sandbox_state{proc_table = PT} = S, _Where, {receive_prepare, Pid, _Waited}) ->
     %% Waited is written in push_req
-    %% Temporary code
-    %% {R, PT1} =
-    %%     case ?TABLE_GET(PT, {receive_status, Pid}) of
-    %%         undefined ->
-    %%             {0, PT};
-    %%         {_, {forwarded_counter, C}} ->
-    %%             {message_queue_len, QL} = erlang:process_info(Pid, message_queue_len),
-    %%             ?INFO("??? ~w ~w", [QL, C]),
-    %%             {C, ?TABLE_REMOVE(PT, {receive_status, Pid})}
-    %%     end,
-    %% PT2 = ?TABLE_SET(PT1, {receive_status, Pid}, prepared),
-    %% {S#sandbox_state{proc_table = PT2}, R};
-    {S#sandbox_state{proc_table = ?TABLE_SET(PT, {receive_status, Pid}, prepared)}, _Waited};
+    {R, PT1} =
+        case ?TABLE_GET(PT, {receive_status, Pid}) of
+            undefined ->
+                {0, PT};
+            {_, {forwarded_counter, C}} ->
+                {message_queue_len, QL} = erlang:process_info(Pid, message_queue_len),
+                ?INFO("??? ~w ~w", [QL, C]),
+                {C, ?TABLE_REMOVE(PT, {receive_status, Pid})}
+        end,
+    PT2 = ?TABLE_SET(PT1, {receive_status, Pid}, prepared),
+    {S#sandbox_state{proc_table = PT2}, R};
 % internal use only
 ctl_handle_call(#sandbox_state{transient_counter = TC} = S,
                 _Where, {become_persistent, _Proc}) ->
@@ -1855,6 +1853,30 @@ ctl_handle_cast(#sandbox_state{undet_signals = _UndetSigs, undet_kick = KickRef}
             S
     end.
 
+ctl_sync_msg_with_undet(Proc, PrevUndetCount, Msg) ->
+    {messages, Q} = erlang:process_info(Proc, messages),
+    {0, UndetMsgs} =
+        lists:foldl(
+          fun ({Ctl, _, _}, Acc) when Ctl =:= self() ->
+                  Acc;
+              ({Ctl, _}, Acc) when Ctl =:= self() ->
+                  Acc;
+              (UndetMsg, {0, L}) ->
+                  {0, [UndetMsg | L]};
+              (_UndetMsg, {C, []}) ->
+                  {C - 1, []}
+          end, {PrevUndetCount, []}, Q),
+    L = length(UndetMsgs),
+    case L > 0 of
+        true ->
+            ?INFO("to ~w:~n"
+                  "  append external msgs ~p~n"
+                  "  before sending msg ~p",
+                  [Proc, UndetMsgs, Msg]);
+        false -> ok
+    end,
+    {PrevUndetCount + L, [Msg | UndetMsgs]}.
+
 ctl_process_send( #sandbox_state
                   { opt = Opt
                   , proc_table = PT
@@ -1880,36 +1902,21 @@ ctl_process_send( #sandbox_state
             {_, MsgQueue} ->
                 case ?TABLE_GET(PT, {receive_status, Proc}) of
                     undefined ->
-                        %% Temporary code
-                        %% {message_queue_len, QL} = erlang:process_info(Proc, message_queue_len),
-                        %% {Msgs, PT1} =
-                        %%     case QL > 0 of
-                        %%         true ->
-                        %%             {messages, Q} = erlang:process_info(Proc, messages),
-                        %%             ?INFO("forward undet messages of ~w~n"
-                        %%                   "  ~p",
-                        %%                   [Proc, Q]),
-                        %%             {[Msg | lists:reverse(Q)], ?TABLE_SET(PT, {receive_status, Proc}, {forwarded_counter, QL})};
-                        %%         false ->
-                        %%             {[Msg], PT}
-                        %%     end,
-                        %% {S#sandbox_state{proc_table = ?TABLE_SET(PT1, {msg_queue, Proc}, Msgs ++ MsgQueue)}, ok, queued};
-                        {S#sandbox_state{proc_table = ?TABLE_SET(PT, {msg_queue, Proc}, [Msg | MsgQueue])}, ok, queued};
-                    %% {_, {forwarded_counter, C}} ->
-                    %%     {message_queue_len, QL} = erlang:process_info(Proc, message_queue_len),
-                    %%     {Msgs, PT1} =
-                    %%         case QL > C of
-                    %%             true ->
-                    %%                 {messages, FullQ} = erlang:process_info(Proc, messages),
-                    %%                 Q = lists:sublist(FullQ, C + 1, QL - C),
-                    %%                 ?INFO("forward undet messages of ~w~n"
-                    %%                       "  ~p",
-                    %%                       [Proc, Q]),
-                    %%                 {[Msg | lists:reverse(Q)], ?TABLE_SET(PT, {receive_status, Proc}, {forwarded_counter, QL})};
-                    %%             false ->
-                    %%                 {[Msg], PT}
-                    %%         end,
-                    %%     {S#sandbox_state{proc_table = ?TABLE_SET(PT1, {msg_queue, Proc}, Msgs ++ MsgQueue)}, ok, queued};
+                        case ctl_sync_msg_with_undet(Proc, 0, Msg) of
+                            {0, _} ->
+                                {S#sandbox_state{proc_table = ?TABLE_SET(PT, {msg_queue, Proc}, [Msg | MsgQueue])}, ok, queued};
+                            {FC, Msgs} ->
+                                PT1 = ?TABLE_SET(PT, {receive_status, Proc}, {forwarded_counter, FC}),
+                                {S#sandbox_state{proc_table = ?TABLE_SET(PT1, {msg_queue, Proc}, Msgs ++ MsgQueue)}, ok, queued}
+                        end;
+                    {_, {forwarded_counter, FC0}} ->
+                        case ctl_sync_msg_with_undet(Proc, FC0, Msg) of
+                            {FC0, _} ->
+                                {S#sandbox_state{proc_table = ?TABLE_SET(PT, {msg_queue, Proc}, [Msg | MsgQueue])}, ok, queued};
+                            {FC, Msgs} ->
+                                PT1 = ?TABLE_SET(PT, {receive_status, Proc}, {forwarded_counter, FC}),
+                                {S#sandbox_state{proc_table = ?TABLE_SET(PT1, {msg_queue, Proc}, Msgs ++ MsgQueue)}, ok, queued}
+                        end;
                     {_, prepared} ->
                         %% XXX Do we want to send directly to the process so it synchonized with the proc msg queue with undet message?
                         {S#sandbox_state{proc_table = ?TABLE_SET(PT, {msg_queue, Proc}, [Msg | MsgQueue])}, ok, queued};
@@ -2294,21 +2301,24 @@ handle(Old, New, Tag, Args, Ann) ->
                     error(timeout_value)
             end,
             Ctl = get_ctl(),
-            _ = call_ctl(Ctl, Ann, {receive_prepare, self()}),
+            {ok, UndetMsgsToOmit} = call_ctl(Ctl, Ann, {receive_prepare, self()}),
             %% From now on, until ctl returns a message, the message queue is locked
-            %% Temporary code
-            %% (fun F(N) ->
-            %%          case N > 0 of
-            %%              true ->
-            %%                  receive
-            %%                      _ -> F(N - 1)
-            %%                  after
-            %%                      0 -> ?WARNING("unexpected end of messages??? expected length: ~w, now ~w", [NMsgToOmit, NMsgToOmit - N])
-            %%                  end;
-            %%              false ->
-            %%                  ok
-            %%          end
-            %%  end)(NMsgToOmit),
+            (fun F(N) ->
+                     case N > 0 of
+                         true ->
+                             receive
+                                 _ ->
+                                     F(N - 1)
+                             after
+                                 0 ->
+                                     ?WARNING("unexpected end of messages ??? expected length: ~w, now ~w",
+                                              [UndetMsgsToOmit, UndetMsgsToOmit - N]),
+                                     ok
+                             end;
+                         false ->
+                             ok
+                     end
+             end)(UndetMsgsToOmit),
             handle_undet_message(Ctl, Ann),
             handle_signals(Ann),
             {ok, Ref} = ?cc_process_receive(Ctl, Ann, self(), PatFun, Timeout),
