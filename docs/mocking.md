@@ -7,7 +7,7 @@ To use that, a user needs to first specify the `aux_module` support in sandbox o
 {Ctl, MRef} = morpheus_sandbox:start(M, F, A, [monitor, {aux_module, AuxModule}])
 ```
 
-After the `aux_module` is specified, Morpheus would try consult the callback function `AuxModule`:`?MORPHEUS_CB_TO_OVERRIDE(Data, M, F, Arity)` for every function when instrumenting, and override the function according to the return value.
+After the `aux_module` is specified, Morpheus would try consult the callback function `AuxModule`:`?MORPHEUS_CB_TO_OVERRIDE(Data, M, F, Arity)`<sup>[1](#fn1)</sup> for every function when instrumenting, and override the function according to the return value.
 The meaning of the arguments is:
 
  - `Data`: user supplied data. It is `undefined` by default, you can pass in any data by specifying `{aux_data, Data}` option in the start call.
@@ -31,3 +31,5 @@ The meaning of the arguments is:
  - `Ann`: Static annotation of the overriding function.
 
 According to the meaning, the most easy way to forward the call to the original function is to call `apply(New, OrigF, A)`.
+
+<a name="fn1">1</a>: The name macros is in `morpheus.hrl`, which can be included by `-include_lib("morpheus/include/morpheus.hrl").`.
