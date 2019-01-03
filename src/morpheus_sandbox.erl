@@ -413,10 +413,11 @@ call_ctl(Ctl, Where, Args) ->
     MRef = erlang:monitor(process, Ctl),
     Ctl ! {call, Where, self(), MRef, Args},
     receive
-        {MRef, Ret} ->
+        {Ctl, MRef, Ret} ->
             erlang:demonitor(MRef, [flush]),
             {ok, Ret};
         {'DOWN', MRef, _, _, _} ->
+            %% If should not happen until the world collapse
             {failed, 'DOWN'}
     end.
 
@@ -474,7 +475,7 @@ ctl_loop(S0) ->
                                 true -> ?INFO("delay undet resp ~p", [Req]);
                                 false -> ok
                             end,
-                            Pid ! {Ref, ok},
+                            Pid ! {self(), Ref, ok},
                             ctl_loop(ctl_push_request_to_buffer(S, #{where => Where}, Aid, undet, Ref, Req));
                         _ ->
                             case ToTrace of
@@ -826,7 +827,7 @@ ctl_loop_call(S0, Where, ToTrace,
         undet ->
             ok;
         _ when is_pid(ReplyTo) ->
-            ReplyTo ! {Ref, Ret}
+            ReplyTo ! {self(), Ref, Ret}
     end,
     NewS.
 
@@ -1360,7 +1361,7 @@ ctl_handle_call(#sandbox_state{ opt = _Opt
                 not_found ->
                     case Timeout of
                         0 ->
-                            Proc ! {Ref, timeout},
+                            Proc ! {self(), Ref, timeout},
                             {S, Ref};
                         infinity ->
                             PT1 = ?TABLE_SET(PT, {receive_status, Proc}, {Ref, PatFun0, infinity}),
@@ -1400,11 +1401,11 @@ ctl_handle_call(#sandbox_state{ opt = _Opt
                 {found, Pos} ->
                     {M, NewMsgQueue} = ?H:take_nth(Pos, MsgQueue),
                     PT1 = ?TABLE_SET(PT, {msg_queue, Proc}, NewMsgQueue),
-                    Proc ! {Ref, [message | M]},
+                    Proc ! {self(), Ref, [message | M]},
                     {S#sandbox_state{proc_table = PT1}, Ref}
             end;
         _ ->
-            Proc ! {Ref, signal},
+            Proc ! {self(), Ref, signal},
             {S, Ref}
     end;
 ctl_handle_call(S, Where, ?cci_send_msg(From, To, M)) ->
@@ -1776,7 +1777,7 @@ ctl_handle_cast( #sandbox_state{ proc_table = PT
                , {receive_timeout, Proc, Ref}) ->
     case ?TABLE_GET(PT, {receive_status, Proc}) of
         {_, {Ref, _PatFun, Timeout}} ->
-            Proc ! {Ref, timeout},
+            Proc ! {self(), Ref, timeout},
             S#sandbox_state{
               proc_table = ?TABLE_REMOVE(PT, {receive_status, Proc}),
               alive = [Proc | S#sandbox_state.alive],
@@ -1915,7 +1916,7 @@ ctl_process_send( #sandbox_state
                     {_, {Ref, PatFun, _Timeout}} ->
                         case PatFun(Msg) of
                             true ->
-                                Proc ! {Ref, [message | Msg]},
+                                Proc ! {self(), Ref, [message | Msg]},
                                 case _Timeout of
                                     infinity ->
                                         {S#sandbox_state{proc_table = ?TABLE_REMOVE(PT, {receive_status, Proc}),
@@ -1962,7 +1963,7 @@ ctl_process_send_signal( #sandbox_state
                 {_, prepared} ->
                     {S, ok};
                 {_, {Ref, _PatFun, _Timeout}} ->
-                    Proc ! {Ref, signal},
+                    Proc ! {self(), Ref, signal},
                     case _Timeout of
                         infinity ->
                             {S#sandbox_state{proc_table = ?TABLE_REMOVE(PT, {receive_status, Proc}),
@@ -2358,7 +2359,7 @@ handle_undet_message(Ctl, Where) ->
 
 handle_receive(Ctl, Where, Ref) ->
     receive
-        {Ref, Resp} ->
+        {Ctl, Ref, Resp} ->
             Resp;
         {'ETS-TRANSFER', _, _, morpheus_internal} ->
             %% ignore redundant internal give_away message
@@ -2427,8 +2428,8 @@ instrumented_process_created(Ctl, Where, ShTab, Node, Proc, Creator, Entry) ->
     ?SHTABLE_SET(ShTab, {proc_abs_id, Proc}, NewAbsId),
     {ok, ok} = ?cc_instrumented_process_created(Ctl, Where, Node, Proc, Creator, Entry).
 
-instrumented_process_kick(_Ctl, _Node, Proc) ->
-    Proc ! start.
+instrumented_process_kick(Ctl, _Node, Proc) ->
+    Proc ! {Ctl, start}.
 
 get_ctl() ->
     case get(?PDK_CTL) of
@@ -2479,7 +2480,7 @@ instrumented_process_start(Ctl, Node, Opt, ShTab) ->
     put(?PDK_NODE, Node),
     put(?PDK_OPT, Opt),
     put(?PDK_SHTAB, ShTab),
-    receive start -> ok end,
+    receive {Ctl, start} -> ok end,
     {_, AbsId} = ?SHTABLE_GET(ShTab, {proc_abs_id, self()}),
     put(?PDK_ABS_ID, AbsId),
     put(?PDK_PID_CREATION_COUNT, 0),
@@ -2544,7 +2545,7 @@ become_tomb() ->
 %%     receive _ -> erlang:hibernate(?MODULE, tomb, []) after infinity -> error(zombie) end.
 
 hibernate_entry(M, F, A) ->
-    receive morpheus_internal_hibernate_wakeup -> ok end,
+    receive {_, morpheus_internal_hibernate_wakeup} -> ok end,
     instrumented_process_end(?CATCH(apply(M, F, A))).
 
 %% sandboxed lib erlang handling
@@ -2867,7 +2868,7 @@ handle_erlang(unique_integer, _Args, {_Old, _New, Ann}) ->
 %% hibernate
 handle_erlang(hibernate, [M, F, A], {_Old, _New, Ann}) ->
     {M0, F0, A0} = rewrite_call(Ann, M, F, A),
-    self() ! morpheus_internal_hibernate_wakeup,
+    self() ! {get_ctl(), morpheus_internal_hibernate_wakeup},
     erlang:hibernate(?MODULE, hibernate_entry, [M0, F0, A0]);
 %% HACK, this is for rand! hopefully we don't mess up other things
 %% XXX only do this if the stack contains rand:seed_s?
