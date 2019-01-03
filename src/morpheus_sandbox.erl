@@ -2208,17 +2208,19 @@ handle(Old, New, Tag, Args, Ann) ->
             ?cc_undet(get_ctl(), Ann),
             R;
         {apply, [F, A]} ->
-            case is_function(F) andalso erlang:fun_info(F, type) of
-                {type, external} ->
-                    {module, Mod} = erlang:fun_info(F, module),
-                    {name, Name} = erlang:fun_info(F, name),
-                    handle(Old, New, call, [Mod, Name, A], Ann);
-                {type, local} ->
-                    erlang:apply(F, A);
-                Other ->
-                    ?WARNING("Unhandled apply fun ~p info ~p", [F, Other]),
-                    error(apply_bad_fun)
-            end;
+            %% seems that we handle this now in erlang:make_fun. Just keep this in case
+            %% case is_function(F) andalso erlang:fun_info(F, type) of
+            %%     {type, external} ->
+            %%         {module, Mod} = erlang:fun_info(F, module),
+            %%         {name, Name} = erlang:fun_info(F, name),
+            %%         handle(Old, New, call, [Mod, Name, A], Ann);
+            %%     {type, local} ->
+            %%         erlang:apply(F, A);
+            %%     Other ->
+            %%         ?WARNING("Unhandled apply fun ~p info ~p", [F, Other]),
+            %%         error(apply_bad_fun)
+            %% end;
+            erlang:apply(F, A);
         %% {call, [code, load_binary, _A]} ->
         %%     [LBM, LBF | _] = _A,
         %%     ?WARNING("~w called unsupported function code:load_binary(~w, ~w, ...)", [Old, LBM, LBF]),
@@ -2226,6 +2228,9 @@ handle(Old, New, Tag, Args, Ann) ->
         {call, [code, purge, A]} ->
             ?INFO("ignored code:purge ~p", [A]),
             true;
+        {call, [erlang, make_fun, [M, F, Arity]]} ->
+            {NewM, NewF} = rewrite_mfa(Ann, M, F, Arity),
+            erlang:make_fun(NewM, NewF, Arity);
         {call, [erlang, F, A]} ->
             handle_erlang(F, A, {Old, New, Ann});
         {call, [init, F, A]} ->
@@ -2320,16 +2325,19 @@ handle(Old, New, Tag, Args, Ann) ->
             end
     end.
 
-rewrite_call(Where, M, F, A) ->
-    Arity = length(A),
-    case ?I:whitelist_func(M, F, Arity) of
+rewrite_mfa(Where, M, F, A) ->
+    case ?I:whitelist_func(M, F, A) of
         true ->
-            {M, F, A};
+            {M, F};
         false ->
             Ctl = get_ctl(),
-            {ok, NewM, NewF} = get_instrumented_func(Ctl, Where, M, F, Arity),
-            {NewM, NewF, A}
+            {ok, NewM, NewF} = get_instrumented_func(Ctl, Where, M, F, A),
+            {NewM, NewF}
     end.
+
+rewrite_call(Where, M, F, A) ->
+    {NewM, NewF} = rewrite_mfa(Where, M, F, length(A)),
+    {NewM, NewF, A}.
 
 handle_undet_message(Ctl, Where) ->
     receive
