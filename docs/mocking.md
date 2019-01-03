@@ -32,4 +32,4 @@ The meaning of the arguments is:
 
 According to the meaning, the most easy way to forward the call to the original function is to call `apply(New, OrigF, A)`.
 
-<a name="fn1">1</a>: The name macros is in `morpheus.hrl`, which can be included by `-include_lib("morpheus/include/morpheus.hrl").`.
+<a name="fn1">1</a>: The name macros are defined in `morpheus.hrl`, which can be included by `-include_lib("morpheus/include/morpheus.hrl").`.
