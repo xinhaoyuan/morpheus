@@ -916,29 +916,31 @@ ctl_handle_call(#sandbox_state{mod_table = MT} = S,
                        {M, ObjectCode, Filename} =
                            case code:get_object_code(M) of
                                error ->
-                                   ?WARNING("Cannot instrument module ~p. "
-                                            "Will use the original module. "
-                                            "To fix, use code:add_path/1 outside the sanbdox.", [M]),
-                                   throw(skip);
-                                   %% case code:which(M) of
-                                   %%     preloaded ->
-                                   %%         #sandbox_state{opt = #sandbox_opt{preloaded_root = Root}} = S,
-                                   %%         case Root of
-                                   %%             _ when is_list(Root) ->
-                                   %%                 {M,
-                                   %%                  Root ++ "/ebin/" ++ atom_to_list(M) ++ ".beam",
-                                   %%                  %% XXX or use beam file instead?
-                                   %%                  Root ++ "/src/" ++ atom_to_list(M) ++ ".erl"};
-                                   %%             _ ->
-                                   %%                 ?WARNING("Cannot instrument preloaded module ~p. "
-                                   %%                          "Will use the original module. "
-                                   %%                          "Set preloaded_root if you want to instrument it.", [M]),
-                                   %%                 throw(skip)
-                                   %%         end;
-                                   %%     _ ->
-                                   %%         error(cannot_get_object_code)
-                                   %% end;
-                               {_, _, _} = _Result -> _Result
+                                   case code:which(M) of
+                                       preloaded->
+                                           ?WARNING("Cannot instrument a preloaded module ~s. "
+                                                    "Will use the original module. "
+                                                    "Make sure the code path contains it.", [M]),
+                                           throw(skip);
+                                       cover_compiled ->
+                                           ?WARNING("Cannot instrument a cover-compiled module ~s. "
+                                                    "Will use the original module. ", [M]),
+                                           throw(skip);
+                                       non_existing ->
+                                           throw(skip);
+                                       _Filename ->
+                                           case filename:extension(_Filename) of
+                                               ".erl" ->
+                                                   ok;
+                                               Ext ->
+                                                   ?WARNING("Do not know how to deal with module ~s when code:which(.) returns ~s file", [M, Ext]),
+                                                   throw(skip)
+                                           end,
+                                           {ok, _M, _Binary} = compile:file(_Filename, [binary, debug_info, report_errors]),
+                                           {_M, _Binary, _Filename}
+                                   end;
+                               {_, _, _} = _Result ->
+                                   _Result
                            end,
                        {ok, S1, Nifs, _} = ?I:instrument_and_load(?MODULE, S, M, NewM, Filename, ObjectCode),
                        NewMT = ?TABLE_SET(MT, M, {NewM, Nifs}),
