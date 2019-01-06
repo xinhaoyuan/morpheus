@@ -5,7 +5,7 @@
 %% API.
 -export([ start_link/1
         , trace_call/4
-        , trace_new_process/6
+        , trace_new_process/5
         , trace_send/7
         , trace_receive/5
         , trace_report_state/3
@@ -48,8 +48,8 @@ start_link(Args) ->
 trace_call(T, From, Where, Req) ->
     gen_server:cast(T, {call, From, Where, Req}).
 
-trace_new_process(T, Proc, AbsId, Creator, EntryInfo, EntryHash) ->
-    gen_server:cast(T, {new_process, Proc, AbsId, Creator, EntryInfo, EntryHash}).
+trace_new_process(T, Proc, AbsId, Creator, EntryInfo) ->
+    gen_server:cast(T, {new_process, Proc, AbsId, Creator, EntryInfo}).
 
 trace_send(T, Where, From, To, Type, Content, Effect) ->
     gen_server:cast(T, {send, Where, From, To, Type, Content, Effect}).
@@ -93,20 +93,23 @@ open_or_create_acc_ets_tab(Filename) ->
               create_acc_ets_tab()
       end).
 
-%% Merge per-actor path.
 merge_path_coverage(Tab, AccTab) ->
+    merge_path_coverage(Tab, AccTab, undefined).
+
+%% Merge per-actor path.
+merge_path_coverage(Tab, AccTab, SimpMap) ->
     ProcState =
         ets:foldl(
-          fun (?TraceNewProcess(_, Proc, _AbsId, _Creator, _EntryInfo, EntryHash), ProcState) ->
+          fun (?TraceNewProcess(_, Proc, _AbsId, _Creator, EntryInfo), ProcState) ->
                   [{root, Root}] = ets:lookup(AccTab, root),
-                  Branch = {new, Proc, EntryHash},
+                  Branch = {new, simplify(Proc, SimpMap), simplify(EntryInfo, SimpMap)},
                   case ets:lookup(AccTab, {Root, Branch}) of
                       [] ->
-                          %% AvailableBranch = ets:match(AccTab, {{Root, '$1'}, '_'}),
-                          %% io:format(user,
-                          %%           "New branch ~p at ~p~n"
-                          %%           "  available: ~p~n",
-                          %%           [Branch, Root, AvailableBranch]),
+                          AvailableBranch = ets:match(AccTab, {{Root, '$1'}, '_'}),
+                          io:format(user,
+                                    "New branch ~p at ~p~n"
+                                    "  available: ~p~n",
+                                    [Branch, Root, AvailableBranch]),
                           NewNode = ets:update_counter(AccTab, node_counter, 1),
                           ets:insert(AccTab, {{Root, Branch}, NewNode}),
                           ProcState#{Proc => {NewNode, true}};
@@ -117,14 +120,15 @@ merge_path_coverage(Tab, AccTab) ->
                   case maps:is_key(From, ProcState) of
                       true ->
                           #{From := {StateNode, _}} = ProcState,
-                          Branch = {send, Where, To, Type, Content},
+                          SimpContent = simplify(Content, SimpMap),
+                          Branch = {send, Where, simplify(To, SimpMap), Type, SimpContent},
                           case ets:lookup(AccTab, {StateNode, Branch}) of
                               [] ->
-                                  %% AvailableBranch = ets:match(AccTab, {{StateNode, '$1'}, '_'}),
-                                  %% io:format(user,
-                                  %%           "New branch ~p at ~p~n"
-                                  %%           "  available: ~p~n",
-                                  %%           [Branch, StateNode, AvailableBranch]),
+                                  AvailableBranch = ets:match(AccTab, {{StateNode, '$1'}, '_'}),
+                                  io:format(user,
+                                            "New branch ~p at ~p~n"
+                                            "  available: ~p~n",
+                                            [Branch, StateNode, AvailableBranch]),
                                   NewNode = ets:update_counter(AccTab, node_counter, 1),
                                   ets:insert(AccTab, {{StateNode, Branch}, NewNode}),
                                   ProcState#{From := {NewNode, true}};
@@ -138,7 +142,8 @@ merge_path_coverage(Tab, AccTab) ->
                   case maps:is_key(To, ProcState) of
                       true ->
                           #{To := {StateNode, _}} = ProcState,
-                          Branch = {recv, Where, Type, Content},
+                          SimpContent = simplify(Content, SimpMap),
+                          Branch = {recv, Where, Type, SimpContent},
                           case ets:lookup(AccTab, {StateNode, Branch}) of
                               [] ->
                                   %% AvailableBranch = ets:match(AccTab, {{StateNode, '$1'}, '_'}),
@@ -204,13 +209,7 @@ merge_state_coverage(Tab, AccTab) ->
 merge_state_coverage(Tab, IterationId, AccTab, SimpMap) ->
     ets:foldl(
       fun (?TraceReportState(_, Depth, RState), Acc) ->
-              SimpState =
-                  case SimpMap of
-                      undefined ->
-                          RState;
-                      _ ->
-                          simplify(RState, SimpMap)
-                  end,
+              SimpState = simplify(RState, SimpMap),
               case ets:insert_new(AccTab, {{state_coverage, SimpState}, 1, 1, [{IterationId, Depth}]}) of
                   true ->
                       ets:update_counter(AccTab, state_coverage_counter, 1),
@@ -243,6 +242,8 @@ extract_simplify_map(SHT) ->
               Acc
       end, #{}, SHT).
 
+simplify(D, undefined) ->
+    D;
 simplify([H | T], SimpMap) ->
     [simplify(H, SimpMap) | simplify(T, SimpMap)];
 simplify(Data, SimpMap) when is_tuple(Data) ->
@@ -344,7 +345,7 @@ handle_call({stop, SeedInfo, SHT},
     ets:insert(AccTab, {{iteration_seed, IC}, SeedInfo}),
     case PC of
         true ->
-            merge_path_coverage(Tab, AccTab),
+            merge_path_coverage(Tab, AccTab, SimpMap),
             [{path_coverage_counter, PathCoverageCount}] = ets:lookup(AccTab, path_coverage_counter),
             io:format(user, "path coverage count = ~p~n", [PathCoverageCount]);
         false ->
@@ -383,9 +384,9 @@ handle_cast({call, From, Where, Req}, #state{tab = Tab} = State) when Tab =/= un
     TC = ets:update_counter(Tab, trace_counter, 1),
     ets:insert(Tab, ?TraceCall(TC, From, Where, Req)),
     {noreply, State};
-handle_cast({new_process, Proc, AbsId, Creator, EntryInfo, EntryHash}, #state{tab = Tab} = State) when Tab =/= undefined ->
+handle_cast({new_process, Proc, AbsId, Creator, EntryInfo}, #state{tab = Tab} = State) when Tab =/= undefined ->
     TC = ets:update_counter(Tab, trace_counter, 1),
-    ets:insert(Tab, ?TraceNewProcess(TC, Proc, AbsId, Creator, EntryInfo, EntryHash)),
+    ets:insert(Tab, ?TraceNewProcess(TC, Proc, AbsId, Creator, EntryInfo)),
     {noreply, State};
 handle_cast({send, Where, From, To, Type, Content, Effect}, #state{tab = Tab} = State) when Tab =/= undefined->
     TC = ets:update_counter(Tab, trace_counter, 1),

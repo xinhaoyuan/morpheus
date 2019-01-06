@@ -150,6 +150,12 @@ sht_abs_id(SHT, Proc) ->
             Proc
     end.
 
+%% Temporary
+decode_module_name(Ctl, _Node, Name) ->
+    Prefix = "$M$" ++ pid_to_list(Ctl) ++ "$",
+    list_to_atom(atom_to_list(Name) -- Prefix).
+
+
 ctl_trace_send(#sandbox_opt{trace_send = Trace, aux_module = Aux, tracer_pid = TP} = Opt, SHT,
                Where, From, To, Type, Content, Effect) ->
     case {Trace, ?SHTABLE_GET(SHT, tracing)} of
@@ -206,31 +212,35 @@ ctl_trace_receive_real(_Opt, _SHT,
                        Where, Proc, Type, undefined) ->
     ?INFO("~w@~p <-!-:~n  ~p", [Proc, Where, Type]).
 
-ctl_trace_new_process(#sandbox_opt{trace_send = TSend, trace_receive = TRecv, tracer_pid = TP}, SHT, Proc, Creator, Entry) ->
+ctl_trace_new_process(#sandbox_opt{trace_send = TSend, trace_receive = TRecv, tracer_pid = TP}, SHT, Node, Proc, Creator, Entry) ->
     EntryInfo =
         case Entry of
             {mfa, _, _, _} ->
                 Entry;
             {local, F, A} ->
-                {local, erlang:fun_info(F), A}
+                FI = erlang:fun_info(F),
+                M = decode_module_name(self(), Node, proplists:get_value(module, FI)),
+                I = proplists:get_value(new_index, FI),
+                Env = proplists:get_value(env, FI),
+                {local, {M, I, Env}, A}
         end,
-    EntryHash = erlang:phash2(Entry),
     case TSend orelse TRecv orelse (TP =/= undefined) of
         true ->
             {_, AbsId} = ?SHTABLE_GET(SHT, {proc_abs_id, Proc}),
             case TSend orelse TRecv of
                 true->
                     ?INFO("~w created: ~w~n"
+                          "  node: ~w~n"
                           "  creator: ~p~n"
                           "  entry_hash: ~w~n"
                           "  entry: ~p",
-                          [Proc, AbsId, Creator, EntryHash, EntryInfo]);
+                          [Proc, AbsId, Node, Creator, EntryInfo]);
                 _ -> ok
             end,
             case TP of
                 undefined -> ok;
                 _ ->
-                    ?T:trace_new_process(TP, Proc, AbsId, Creator, EntryInfo, EntryHash)
+                    ?T:trace_new_process(TP, Proc, AbsId, Creator, EntryInfo)
             end;
         _ -> ok
     end.
@@ -256,7 +266,7 @@ ctl_trace_new_process(#sandbox_opt{trace_send = TSend, trace_receive = TRecv, tr
 
 %% proc_shtable stores shared but transient data for communication
 %% between sandboxed processes and ctl:
-%% {exit, PID} -> Reason - exit signal
+%% {signal, PID} -> Reason - signal
 %% {ets, RealEtsRef} -> {VirtualEtsRef, Owner, HeirInfo} - set before a sandbox process give ets control to sandbox ctl
 %% {proc_abs_id, PID} -> [Node, PList] - shared mapping of abstract id of process
 %% {scoped_weight, PID} -> Weight
@@ -1071,7 +1081,7 @@ ctl_handle_call(#sandbox_state
             ?ERROR("instrumented_process_created happened twice", []),
             {S, badarg};
         {undefined, {_, {Status, _}}} when Status =:= offline; Status =:= online ->
-            ctl_trace_new_process(Opt, SHT, Proc, Creator, Entry),
+            ctl_trace_new_process(Opt, SHT, Node, Proc, Creator, Entry),
             erlang:link(Proc),
             PT0 = ?TABLE_SET(PT,  {proc, Proc}, {alive, dict:new()}),
             PT1 = ?TABLE_SET(PT0, {name, Proc}, {Node, []}),
@@ -1340,7 +1350,7 @@ ctl_handle_call(#sandbox_state{ opt = _Opt
                 _Where, ?cci_process_receive(Proc, PatFun, Timeout)) ->
     PT = ?TABLE_REMOVE(PT0, {receive_status, Proc}),
     Ref = make_ref(),
-    case ?SHTABLE_GET(SHT, {exit, Proc}) of
+    case ?SHTABLE_GET(SHT, {signal, Proc}) of
         undefined ->
             PatFun0 = case PatFun of
                           undefined -> fun (_) -> false end;
@@ -1960,7 +1970,7 @@ ctl_process_send_signal( #sandbox_state
                          , alive_counter = AC} = S
                        , Where, From, Proc, Reason) ->
     ctl_trace_send(Opt, SHT, Where, From, Proc, signal, Reason, sent),
-    ?SHTABLE_SET(SHT, {exit, Proc}, Reason),
+    ?SHTABLE_SET(SHT, {signal, Proc}, Reason),
     case ?TABLE_GET(PT, {msg_queue, Proc}) of
         undefined ->
             {S, external_or_dead};
@@ -2385,7 +2395,7 @@ handle_receive(Ctl, Where, Ref) ->
 
 handle_signals(Where) ->
     ShTab = get_shtab(),
-    case ?SHTABLE_GET(ShTab, {exit, self()}) of
+    case ?SHTABLE_GET(ShTab, {signal, self()}) of
         undefined ->
             ok;
         {_, Reason} ->
@@ -2394,7 +2404,7 @@ handle_signals(Where) ->
             before_tomb(),
             %% cannot throw exit since it may be caught by the guest ...
             ?DEBUG("~p get exit signal ~p", [self(), Reason]),
-            ?SHTABLE_REMOVE(ShTab, {exit, self()}),
+            ?SHTABLE_REMOVE(ShTab, {signal, self()}),
             ?cc_process_on_exit(get_ctl(), Where, self(), Reason),
             become_tomb()
     end.
