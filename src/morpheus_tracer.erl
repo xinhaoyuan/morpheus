@@ -119,34 +119,50 @@ merge_po_coverage(Tab, AccTab, SimpMap) ->
           begin
               #{proc_operation_map := POMReversed} =
                   ets:foldl(
-                    fun (?TraceNewProcess(_, ProcX, _AbsId, CreatorX, _EntryInfo), #{local_vc_map := LVC, message_history_map := MHM, proc_operation_map := POM} = ProcState) ->
+                    fun (?TraceNewProcess(_, ProcX, _AbsId, CreatorX, _EntryInfo),
+                         #{local_vc_map := LVC, inbox_vc_map := IBM, message_history_map := MHM, proc_operation_map := POM} = ProcState) ->
+                            %% When a new process is created the created process inherit the creator's VC.
+                            %% (But we explicitly add a stamp depending to itself, which simplifies later accesses)
                             Proc = simplify(ProcX, SimpMap), Creator = simplify(CreatorX, SimpMap),
                             %% The creator could be initial, which has no record in state
                             VC = (maps:get(Creator, LVC, #{}))#{Proc => 0},
-                            ProcState#{local_vc_map := LVC#{Proc => VC}, message_history_map := MHM#{Proc => #{}}, proc_operation_map := POM#{Proc => []}};
-                        (?TraceRecv(_Id, _Where, ToX, _Type, Content), #{local_vc_map := LVC, message_history_map := MHM} = ProcState) ->
+                            ProcState#{ local_vc_map := LVC#{Proc => VC}
+                                      , inbox_vc_map := IBM#{Proc => VC}
+                                      , message_history_map := MHM#{Proc => #{}}
+                                      , proc_operation_map := POM#{Proc => []}};
+
+                        (?TraceRecv(_Id, _Where, ToX, _Type, Content),
+                         #{local_vc_map := LVC, message_history_map := MHM} = ProcState) ->
+                            %% Receive of the message needs to happens after the sending operation
                             To = simplify(ToX, SimpMap),
                             #{To := VC} = LVC,
                             #{To := MH} = MHM,
                             #{Content := H} = MH,
                             {{value, MsgVC}, H1} = queue:out(H),
                             %% GVC is not changing for the same reason as creation
-                            ProcState#{local_vc_map := LVC#{To := merge_vc(VC, MsgVC)}, message_history_map := MHM#{To := MH#{Content := H1}}};
-                        (?TraceSend(_, _Where, FromX, ToX, _Type, Content, _Effect), #{local_vc_map := LVC, message_history_map := MHM, proc_operation_map := POM} = ProcState) ->
+                            ProcState#{ local_vc_map := LVC#{To := merge_vc(VC, MsgVC)}
+                                      , message_history_map := MHM#{To := MH#{Content := H1}}};
+
+                        (?TraceSend(_, _Where, FromX, ToX, _Type, Content, _Effect),
+                         #{local_vc_map := LVC, inbox_vc_map := IBM, message_history_map := MHM, proc_operation_map := POM} = ProcState) ->
+                            %% Sending message to a process will make it happen after all sending of existing messages, which is in inbox_vc_map
                             From = simplify(FromX, SimpMap), To = simplify(ToX, SimpMap),
                             #{From := #{From := Step} = VC} = LVC,
                             #{From := PO} = POM,
+                            #{To := IVC} = IBM,
                             #{To := MH} = MHM,
-                            VC1 = VC#{From := Step + 1},
+                            VC1 = merge_vc(IVC, VC#{From := Step + 1}),
                             H = queue:in(VC1, maps:get(Content, MH, queue:new())),
                             ProcState#{ local_vc_map := LVC#{From := VC1}
+                                      , inbox_vc_map := IBM#{To := VC1}
                                       , message_history_map := MHM#{To := MH#{Content => H}}
                                       , proc_operation_map := POM#{From => [{VC, To} | PO]}
                                       };
+
                         (_, ProcState) ->
                             ProcState
                     end,
-                    #{local_vc_map => #{}, message_history_map => #{}, proc_operation_map => #{}},
+                    #{local_vc_map => #{}, inbox_vc_map => #{}, message_history_map => #{}, proc_operation_map => #{}},
                     Tab),
               POM =
                   maps:fold(
