@@ -108,8 +108,8 @@ merge_po_coverage(Tab, AccTab) ->
     merge_po_coverage(Tab, AccTab, undefined).
 
 merge_po_coverage(Tab, AccTab, SimpMap) ->
-    %% Reconstruct the trace with vector clock.
-    %% After the step, we would ignore process creation and receiving as scheduable operations for partial order coverage.
+    %% Reconstruct the trace according to vector clocks. Traces with the same reconstructed trace are po-equivalent.
+    %% We ignore process creation and receiving for partial order trace.
     %% And for now, we only consider send operations.
     %% To rebuild recv-send dependency, we need to rebuild the message history for each process.
     %%
