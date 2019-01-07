@@ -27,6 +27,7 @@
 -record(state, { tab             :: ets:tid()
                , acc_filename    :: string()
                , acc_fork_period :: integer()
+               , dump_traces     :: boolean()
                , dump_on_new_coverage :: boolean()
                , po_coverage     :: boolean()
                , path_coverage   :: boolean()
@@ -102,7 +103,10 @@ merge_vc(VC1, VC2) ->
       end, VC2, VC1).
 
 merge_po_coverage(#state{dump_on_new_coverage = Dump}, Tab, AccTab, SimpMap) ->
-    %% Reconstruct the trace according to vector clocks. Traces with the same reconstructed trace are po-equivalent.
+    %% Reconstruct the trace according to vector clocks.
+    %% Traces with the same reconstructed vector clocks are po-equivalent.
+    %% Thus we can count how many partial orders has been covered.
+    %%
     %% We ignore process creation and receiving for partial order trace.
     %% And for now, we only consider send operations.
     %% To rebuild recv-send dependency, we need to rebuild the message history for each process.
@@ -326,6 +330,26 @@ merge_state_coverage(Tab, IterationId, AccTab, SimpMap) ->
               Acc
       end, #{}, Tab).
 
+%% ==== Trace Dump ====
+
+dump_trace(_State, Tab, SimpMap) ->
+    TraceRev = 
+        ets:foldl(
+          fun (?TraceSend(_, _Where, FromX, ToX, _Type, ContentX, _Effect), Acc) ->
+                  From = simplify(FromX, SimpMap),
+                  To = simplify(ToX, SimpMap),
+                  Content = simplify(ContentX, SimpMap),
+                  [ {send, From, To, Content} | Acc ];
+              (?TraceRecv(_, _Where, ToX, _Type, ContentX), Acc) ->
+                  To = simplify(ToX, SimpMap),
+                  Content = simplify(ContentX, SimpMap),
+                  [ {recv, To, Content} | Acc];
+              (_, Acc) ->
+                  Acc
+          end, [], Tab),
+    io:format("Trace: ~p~n", [lists:reverse(TraceRev)]),
+    ok.
+
 %% ========
 
 extract_simplify_map(SHT) ->
@@ -412,6 +436,7 @@ init(Args) ->
         end,
     AccFilename = proplists:get_value(acc_filename, Args, undefined),
     AccForkPeriod = proplists:get_value(acc_fork_period, Args, 0),
+    DumpTraces = proplists:get_value(dump_traces, Args, false),
     DumpOnNewCoverage = proplists:get_value(dump_on_new_coverage, Args, false),
     POCoverage = proplists:get_value(po_coverage, Args, false),
     PathCoverage = proplists:get_value(path_coverage, Args, false),
@@ -420,6 +445,7 @@ init(Args) ->
     State = #state{ tab = Tab
                   , acc_filename = AccFilename
                   , acc_fork_period = AccForkPeriod
+                  , dump_traces = DumpTraces
                   , dump_on_new_coverage = DumpOnNewCoverage
                   , po_coverage = POCoverage
                   , path_coverage = PathCoverage
@@ -433,6 +459,7 @@ handle_call({stop, SeedInfo, SHT},
             #state{ tab = Tab
                   , acc_filename = AF
                   , acc_fork_period = AFP
+                  , dump_traces = Dump
                   , po_coverage = POC
                   , path_coverage = PC
                   , line_coverage = LC
@@ -444,6 +471,12 @@ handle_call({stop, SeedInfo, SHT},
     AccTab = open_or_create_acc_ets_tab(AF),
     IC = ets:update_counter(AccTab, iteration_counter, 1),
     ets:insert(AccTab, {{iteration_seed, IC}, SeedInfo}),
+    case Dump of
+        true ->
+            dump_trace(State, Tab, SimpMap);
+        false ->
+            ok
+    end,
     case POC of
         true ->
             merge_po_coverage(State, Tab, AccTab, SimpMap),
