@@ -266,7 +266,7 @@ ctl_trace_new_process(#sandbox_opt{trace_send = TSend, trace_receive = TRecv, tr
 
 %% proc_shtable stores shared but transient data for communication
 %% between sandboxed processes and ctl:
-%% {signal, PID} -> Reason - signal
+%% {signal, PID} -> {From, Reason} - signal
 %% {ets, RealEtsRef} -> {VirtualEtsRef, Owner, HeirInfo} - set before a sandbox process give ets control to sandbox ctl
 %% {proc_abs_id, PID} -> [Node, PList] - shared mapping of abstract id of process
 %% {scoped_weight, PID} -> Weight
@@ -1895,20 +1895,19 @@ ctl_process_send( #sandbox_state
                   , proc_shtable = SHT
                   , alive_counter = AC} = S
                 , Where, From, Proc, Msg) ->
-    {S0, R, I} =
+    {S0, R, I, MsgsToSend} =
         case ?TABLE_GET(PT, {msg_queue, Proc}) of
             undefined ->
                 case ?TABLE_GET(PT, {proc, Proc}) of
                     {_, {tomb, _}} ->
-                        {S, ok, send_to_tomb};
+                        {S, ok, send_to_tomb, []};
                     undefined ->
                         case {?TABLE_GET(PT, {external_proc, Proc}), ?TABLE_GET(PT, {port_agent, Proc})} of
                             {undefined, undefined} ->
                                 ?INFO("ignored msg to unknown process ~p", [Proc]),
-                                {S, external, ignored};
+                                {S, external, ignored, []};
                             _ ->
-                                Proc ! Msg,
-                                {S, ok, external}
+                                {S, ok, external, [{Proc, Msg}]}
                         end
                 end;
             {_, MsgQueue} ->
@@ -1916,37 +1915,38 @@ ctl_process_send( #sandbox_state
                     undefined ->
                         case ctl_sync_msg_with_undet(Proc, 0, Msg) of
                             {0, _} ->
-                                {S#sandbox_state{proc_table = ?TABLE_SET(PT, {msg_queue, Proc}, [Msg | MsgQueue])}, ok, queued};
+                                {S#sandbox_state{proc_table = ?TABLE_SET(PT, {msg_queue, Proc}, [Msg | MsgQueue])}, ok, queued, []};
                             {FC, Msgs} ->
                                 PT1 = ?TABLE_SET(PT, {receive_status, Proc}, {forwarded_counter, FC}),
-                                {S#sandbox_state{proc_table = ?TABLE_SET(PT1, {msg_queue, Proc}, Msgs ++ MsgQueue)}, ok, queued}
+                                {S#sandbox_state{proc_table = ?TABLE_SET(PT1, {msg_queue, Proc}, Msgs ++ MsgQueue)}, ok, queued, []}
                         end;
                     {_, {forwarded_counter, FC0}} ->
                         case ctl_sync_msg_with_undet(Proc, FC0, Msg) of
                             {FC0, _} ->
-                                {S#sandbox_state{proc_table = ?TABLE_SET(PT, {msg_queue, Proc}, [Msg | MsgQueue])}, ok, queued};
+                                {S#sandbox_state{proc_table = ?TABLE_SET(PT, {msg_queue, Proc}, [Msg | MsgQueue])}, ok, queued, []};
                             {FC, Msgs} ->
                                 PT1 = ?TABLE_SET(PT, {receive_status, Proc}, {forwarded_counter, FC}),
-                                {S#sandbox_state{proc_table = ?TABLE_SET(PT1, {msg_queue, Proc}, Msgs ++ MsgQueue)}, ok, queued}
+                                {S#sandbox_state{proc_table = ?TABLE_SET(PT1, {msg_queue, Proc}, Msgs ++ MsgQueue)}, ok, queued, []}
                         end;
                     {_, prepared} ->
                         %% XXX Do we want to send directly to the process so it synchonized with the proc msg queue with undet message?
-                        {S#sandbox_state{proc_table = ?TABLE_SET(PT, {msg_queue, Proc}, [Msg | MsgQueue])}, ok, queued};
+                        {S#sandbox_state{proc_table = ?TABLE_SET(PT, {msg_queue, Proc}, [Msg | MsgQueue])}, ok, queued, []};
                     {_, {Ref, PatFun, _Timeout}} ->
                         case PatFun(Msg) of
                             true ->
-                                Proc ! {self(), Ref, [message | Msg]},
                                 case _Timeout of
                                     infinity ->
                                         {S#sandbox_state{proc_table = ?TABLE_REMOVE(PT, {receive_status, Proc}),
                                                          alive = [Proc | S#sandbox_state.alive],
-                                                         alive_counter = AC + 1}, ok, matched};
+                                                         alive_counter = AC + 1}, ok, matched
+                                        ,[{Proc, {self(), Ref, [message | Msg]}}]};
                                     _ ->
                                         #sandbox_state{timeouts_counter = TimeoutsC} = S,
                                         {S#sandbox_state{proc_table = ?TABLE_REMOVE(PT, {receive_status, Proc}),
                                                          alive = [Proc | S#sandbox_state.alive],
                                                          alive_counter = AC + 1,
-                                                         timeouts_counter = TimeoutsC - 1}, ok, matched}
+                                                         timeouts_counter = TimeoutsC - 1}, ok, matched
+                                        ,[{Proc, {self(), Ref, [message | Msg]}}]}
                                 end;
                             false ->
                                 NewQueue = [Msg | MsgQueue],
@@ -1956,11 +1956,15 @@ ctl_process_send( #sandbox_state
                                         ?WARNING("Message queue of ~w exceeds 100, maybe leakage?", [Proc]);
                                     true -> ok
                                 end,
-                                {S#sandbox_state{proc_table = ?TABLE_SET(PT, {msg_queue, Proc}, NewQueue)}, ok, not_match_queued}
+                                {S#sandbox_state{proc_table = ?TABLE_SET(PT, {msg_queue, Proc}, NewQueue)}, ok, not_match_queued, []}
                         end
                 end
         end,
+    %% The trick here is to trace before sending anything to the sandbox, so the order in trace is preserved.
     ctl_trace_send(Opt, SHT, Where, From, Proc, message, Msg, I),
+    lists:foreach(
+      fun ({P, M}) -> P ! M end,
+      MsgsToSend),
     {S0, R}.
 
 ctl_process_send_signal( #sandbox_state
@@ -1970,7 +1974,7 @@ ctl_process_send_signal( #sandbox_state
                          , alive_counter = AC} = S
                        , Where, From, Proc, Reason) ->
     ctl_trace_send(Opt, SHT, Where, From, Proc, signal, Reason, sent),
-    ?SHTABLE_SET(SHT, {signal, Proc}, Reason),
+    ?SHTABLE_SET(SHT, {signal, Proc}, {From, Reason}),
     case ?TABLE_GET(PT, {msg_queue, Proc}) of
         undefined ->
             {S, external_or_dead};
@@ -2398,12 +2402,12 @@ handle_signals(Where) ->
     case ?SHTABLE_GET(ShTab, {signal, self()}) of
         undefined ->
             ok;
-        {_, Reason} ->
+        {_, {_From, Reason}} ->
             Opt = get_opt(),
             ctl_trace_receive(Opt, get_shtab(), [], self(), signal, undefined),
             before_tomb(),
             %% cannot throw exit since it may be caught by the guest ...
-            ?DEBUG("~p get exit signal ~p", [self(), Reason]),
+            ?DEBUG("~p got exit signal from ~w: ~p", [self(), _From, Reason]),
             ?SHTABLE_REMOVE(ShTab, {signal, self()}),
             ?cc_process_on_exit(get_ctl(), Where, self(), Reason),
             become_tomb()

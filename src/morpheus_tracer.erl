@@ -13,6 +13,7 @@
         , create_ets_tab/0
         , create_acc_ets_tab/0
         , open_or_create_acc_ets_tab/1
+        , merge_po_coverage/2
         , merge_path_coverage/2
         , merge_line_coverage/2
         , merge_state_coverage/2
@@ -30,6 +31,7 @@
 -record(state, { tab             :: ets:tid()
                , acc_filename    :: string()
                , acc_fork_period :: integer()
+               , po_coverage     :: boolean()
                , path_coverage   :: boolean()
                , line_coverage   :: boolean()
                , state_coverage  :: boolean()
@@ -81,6 +83,7 @@ create_acc_ets_tab() ->
     ets:insert(Tab, {iteration_counter, 0}),
     ets:insert(Tab, {root, 1}),
     ets:insert(Tab, {node_counter, 1}),
+    ets:insert(Tab, {po_coverage_counter, 0}),
     ets:insert(Tab, {path_coverage_counter, 0}),
     ets:insert(Tab, {line_coverage_counter, 0}),
     ets:insert(Tab, {state_coverage_counter, 0}),
@@ -92,6 +95,73 @@ open_or_create_acc_ets_tab(Filename) ->
       fun (_Reason) ->
               create_acc_ets_tab()
       end).
+
+%% ==== Partial Order Coverage ====
+
+merge_vc(VC1, VC2) ->
+    maps:fold(
+      fun (K, V, Acc) ->
+              Acc#{K => max(V, maps:get(K, VC2, 0))}
+      end, VC2, VC1).
+
+merge_po_coverage(Tab, AccTab) ->
+    merge_po_coverage(Tab, AccTab, undefined).
+
+merge_po_coverage(Tab, AccTab, SimpMap) ->
+    %% Reconstruct the trace with vector clock.
+    %% After the step, we would ignore process creation and receiving as scheduable operations for partial order coverage.
+    %% And for now, we only consider send operations.
+    %% To rebuild recv-send dependency, we need to rebuild the message history for each process.
+    %%
+    %% XXX I am not sure how to deal with ETS yet. Probably I would treat each ETS table as a process.
+    #{proc_operation_map := POMReversed} =
+        ets:foldl(
+          fun (?TraceNewProcess(_, ProcX, _AbsId, CreatorX, _EntryInfo), #{local_vc_map := LVC, message_history_map := MHM, proc_operation_map := POM} = ProcState) ->
+                  Proc = simplify(ProcX, SimpMap), Creator = simplify(CreatorX, SimpMap),
+                  %% The creator could be initial, which has no record in state
+                  VC = (maps:get(Creator, LVC, #{}))#{Proc => 0},
+                  ProcState#{local_vc_map := LVC#{Proc => VC}, message_history_map := MHM#{Proc => #{}}, proc_operation_map := POM#{Proc => []}};
+              (?TraceRecv(_, _Where, ToX, _Type, Content), #{local_vc_map := LVC, message_history_map := MHM} = ProcState) ->
+                  To = simplify(ToX, SimpMap),
+                  #{To := VC} = LVC,
+                  #{To := MH} = MHM,
+                  #{Content := H} = MH,
+                  {{value, MsgVC}, H1} = queue:out(H),
+                  %% GVC is not changing for the same reason as creation
+                  ProcState#{local_vc_map := LVC#{To := merge_vc(VC, MsgVC)}, message_history_map := MHM#{To := MH#{Content := H1}}};
+              (?TraceSend(_, _Where, FromX, ToX, _Type, Content, _Effect), #{local_vc_map := LVC, message_history_map := MHM, proc_operation_map := POM} = ProcState) ->
+                  From = simplify(FromX, SimpMap), To = simplify(ToX, SimpMap),
+                  #{From := #{From := Step} = VC} = LVC,
+                  #{From := PO} = POM,
+                  #{To := MH} = MHM,
+                  VC1 = VC#{From := Step + 1},
+                  H = queue:in(VC1, maps:get(Content, MH, queue:new())),
+                  ProcState#{ local_vc_map := LVC#{From := VC1}
+                            , message_history_map := MHM#{To := #{Content => H}}
+                            , proc_operation_map := POM#{From => [{VC, To} | PO]}
+                            };
+              (_, ProcState) ->
+                  ProcState
+          end,
+          #{local_vc_map => #{}, message_history_map => #{}, proc_operation_map => #{}},
+          Tab),
+    POM =
+        maps:fold(
+          fun (Proc, OPList, Acc) ->
+                  Acc#{Proc => lists:reverse(OPList)}
+          end, #{}, POMReversed),
+    case ets:insert_new(AccTab, {{po_trace, POM}, 1}) of
+        true ->
+            io:format("New po trace ~p~n"
+                      "  original ~p~n",
+                      [POM, ets:match(Tab, '$1')]),
+            ets:update_counter(AccTab, po_coverage_counter, 1);
+        false ->
+            ets:update_counter(AccTab, {po_trace, POM}, 1)
+    end,
+    ok.
+
+%% ==== Path Coverage ====
 
 merge_path_coverage(Tab, AccTab) ->
     merge_path_coverage(Tab, AccTab, undefined).
@@ -203,6 +273,8 @@ merge_line_coverage(Tab, AccTab) ->
               Acc
       end, undefined, Tab).
 
+%% ==== State Coverage ====
+
 merge_state_coverage(Tab, AccTab) ->
     merge_state_coverage(Tab, undefined, AccTab, undefined).
 
@@ -231,6 +303,8 @@ merge_state_coverage(Tab, IterationId, AccTab, SimpMap) ->
           (_, Acc) ->
               Acc
       end, #{}, Tab).
+
+%% ========
 
 extract_simplify_map(SHT) ->
     ets:foldl(
@@ -316,12 +390,14 @@ init(Args) ->
         end,
     AccFilename = proplists:get_value(acc_filename, Args, undefined),
     AccForkPeriod = proplists:get_value(acc_fork_period, Args, 0),
+    POCoverage = proplists:get_value(po_coverage, Args, false),
     PathCoverage = proplists:get_value(path_coverage, Args, false),
     LineCoverage = proplists:get_value(line_coverage, Args, false),
     StateCoverage = proplists:get_value(state_coverage, Args, false),
     State = #state{ tab = Tab
                   , acc_filename = AccFilename
                   , acc_fork_period = AccForkPeriod
+                  , po_coverage = POCoverage
                   , path_coverage = PathCoverage
                   , line_coverage = LineCoverage
                   , state_coverage = StateCoverage
@@ -333,6 +409,7 @@ handle_call({stop, SeedInfo, SHT},
             #state{ tab = Tab
                   , acc_filename = AF
                   , acc_fork_period = AFP
+                  , po_coverage = POC
                   , path_coverage = PC
                   , line_coverage = LC
                   , state_coverage = SC
@@ -343,6 +420,14 @@ handle_call({stop, SeedInfo, SHT},
     AccTab = open_or_create_acc_ets_tab(AF),
     IC = ets:update_counter(AccTab, iteration_counter, 1),
     ets:insert(AccTab, {{iteration_seed, IC}, SeedInfo}),
+    case POC of
+        true ->
+            merge_po_coverage(Tab, AccTab, SimpMap),
+            [{po_coverage_counter, POCoverageCount}] = ets:lookup(AccTab, po_coverage_counter),
+            io:format(user, "po coverage count = ~p~n", [POCoverageCount]);
+        false ->
+            ok
+    end,
     case PC of
         true ->
             merge_path_coverage(Tab, AccTab, SimpMap),
