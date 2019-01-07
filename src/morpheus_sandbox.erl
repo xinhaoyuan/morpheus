@@ -2002,8 +2002,9 @@ ctl_process_send_signal( #sandbox_state
     end.
 
 ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT, proc_shtable = SHT} = S, Reason) ->
-    #sandbox_state{weight_table = WT} = S,
-    ?INFO("Weight table:~n  ~p", [dict:to_list(WT)]),
+    %% Not needed for now
+    %% #sandbox_state{weight_table = WT} = S,
+    %% ?INFO("Weight table:~n  ~p", [dict:to_list(WT)]),
     case Reason of
         normal ->
             ok;
