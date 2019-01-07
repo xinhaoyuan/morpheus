@@ -13,10 +13,6 @@
         , create_ets_tab/0
         , create_acc_ets_tab/0
         , open_or_create_acc_ets_tab/1
-        , merge_po_coverage/2
-        , merge_path_coverage/2
-        , merge_line_coverage/2
-        , merge_state_coverage/2
         , calc_acc_fanout/1
         ]).
 
@@ -31,6 +27,7 @@
 -record(state, { tab             :: ets:tid()
                , acc_filename    :: string()
                , acc_fork_period :: integer()
+               , dump_on_new_coverage :: boolean()
                , po_coverage     :: boolean()
                , path_coverage   :: boolean()
                , line_coverage   :: boolean()
@@ -104,10 +101,7 @@ merge_vc(VC1, VC2) ->
               Acc#{K => max(V, maps:get(K, VC2, 0))}
       end, VC2, VC1).
 
-merge_po_coverage(Tab, AccTab) ->
-    merge_po_coverage(Tab, AccTab, undefined).
-
-merge_po_coverage(Tab, AccTab, SimpMap) ->
+merge_po_coverage(#state{dump_on_new_coverage = Dump}, Tab, AccTab, SimpMap) ->
     %% Reconstruct the trace according to vector clocks. Traces with the same reconstructed trace are po-equivalent.
     %% We ignore process creation and receiving for partial order trace.
     %% And for now, we only consider send operations.
@@ -171,9 +165,14 @@ merge_po_coverage(Tab, AccTab, SimpMap) ->
                     end, #{}, POMReversed),
               case ets:insert_new(AccTab, {{po_trace, POM}, 1}) of
                   true ->
-                      io:format("New po trace ~p~n"
-                                "  original ~p~n",
-                                [POM, ets:match(Tab, '$1')]),
+                      case Dump of
+                          true ->
+                              io:format("New po trace ~p~n"
+                                        "  original ~p~n",
+                                        [POM, ets:match(Tab, '$1')]);
+                          false ->
+                              ok
+                      end,
                       ets:update_counter(AccTab, po_coverage_counter, 1);
                   false ->
                       ets:update_counter(AccTab, {po_trace, POM}, 1)
@@ -191,9 +190,6 @@ merge_po_coverage(Tab, AccTab, SimpMap) ->
     ok.
 
 %% ==== Path Coverage ====
-
-merge_path_coverage(Tab, AccTab) ->
-    merge_path_coverage(Tab, AccTab, undefined).
 
 %% Merge per-actor path.
 merge_path_coverage(Tab, AccTab, SimpMap) ->
@@ -303,9 +299,6 @@ merge_line_coverage(Tab, AccTab) ->
       end, undefined, Tab).
 
 %% ==== State Coverage ====
-
-merge_state_coverage(Tab, AccTab) ->
-    merge_state_coverage(Tab, undefined, AccTab, undefined).
 
 merge_state_coverage(Tab, IterationId, AccTab, SimpMap) ->
     ets:foldl(
@@ -419,6 +412,7 @@ init(Args) ->
         end,
     AccFilename = proplists:get_value(acc_filename, Args, undefined),
     AccForkPeriod = proplists:get_value(acc_fork_period, Args, 0),
+    DumpOnNewCoverage = proplists:get_value(dump_on_new_coverage, Args, false),
     POCoverage = proplists:get_value(po_coverage, Args, false),
     PathCoverage = proplists:get_value(path_coverage, Args, false),
     LineCoverage = proplists:get_value(line_coverage, Args, false),
@@ -426,6 +420,7 @@ init(Args) ->
     State = #state{ tab = Tab
                   , acc_filename = AccFilename
                   , acc_fork_period = AccForkPeriod
+                  , dump_on_new_coverage = DumpOnNewCoverage
                   , po_coverage = POCoverage
                   , path_coverage = PathCoverage
                   , line_coverage = LineCoverage
@@ -451,7 +446,7 @@ handle_call({stop, SeedInfo, SHT},
     ets:insert(AccTab, {{iteration_seed, IC}, SeedInfo}),
     case POC of
         true ->
-            merge_po_coverage(Tab, AccTab, SimpMap),
+            merge_po_coverage(State, Tab, AccTab, SimpMap),
             [{po_coverage_counter, POCoverageCount}] = ets:lookup(AccTab, po_coverage_counter),
             io:format(user, "po coverage count = ~p~n", [POCoverageCount]);
         false ->
