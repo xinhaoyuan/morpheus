@@ -129,9 +129,10 @@ merge_po_coverage(#state{dump_on_new_coverage = Dump}, Tab, AccTab, SimpMap) ->
                                       , message_history_map := MHM#{Proc => #{}}
                                       , proc_operation_map := POM#{Proc => []}};
 
-                        (?TraceRecv(_Id, _Where, ToX, _Type, Content),
+                        (?TraceRecv(_Id, _Where, ToX, message, Content),
                          #{local_vc_map := LVC, message_history_map := MHM} = ProcState) ->
                             %% Receive of the message needs to happens after the sending operation
+                            %% Note that for now only message receive is in scope, others (e.g. signals, timeouts) are ignored for now.
                             To = simplify(ToX, SimpMap),
                             #{To := VC} = LVC,
                             #{To := MH} = MHM,
@@ -144,18 +145,32 @@ merge_po_coverage(#state{dump_on_new_coverage = Dump}, Tab, AccTab, SimpMap) ->
                         (?TraceSend(_, _Where, FromX, ToX, _Type, Content, _Effect),
                          #{local_vc_map := LVC, inbox_vc_map := IBM, message_history_map := MHM, proc_operation_map := POM} = ProcState) ->
                             %% Sending message to a process will make it happen after all sending of existing messages, which is in inbox_vc_map
-                            From = simplify(FromX, SimpMap), To = simplify(ToX, SimpMap),
-                            #{From := #{From := Step} = VC} = LVC,
-                            #{From := PO} = POM,
-                            #{To := IVC} = IBM,
-                            #{To := MH} = MHM,
-                            VC1 = merge_vc(IVC, VC#{From := Step + 1}),
-                            H = queue:in(VC1, maps:get(Content, MH, queue:new())),
-                            ProcState#{ local_vc_map := LVC#{From := VC1}
-                                      , inbox_vc_map := IBM#{To := VC1}
-                                      , message_history_map := MHM#{To := MH#{Content => H}}
-                                      , proc_operation_map := POM#{From => [{VC, To} | PO]}
-                                      };
+                            case is_pid(FromX) of
+                                true ->
+                                    From = simplify(FromX, SimpMap), To = simplify(ToX, SimpMap),
+                                    #{From := #{From := Step} = VC} = LVC,
+                                    #{From := PO} = POM,
+                                    #{To := IVC} = IBM,
+                                    #{To := MH} = MHM,
+                                    VC1 = merge_vc(IVC, VC#{From := Step + 1}),
+                                    H = queue:in(VC1, maps:get(Content, MH, queue:new())),
+                                    ProcState#{ local_vc_map := LVC#{From := VC1}
+                                              , inbox_vc_map := IBM#{To := VC1}
+                                              , message_history_map := MHM#{To := MH#{Content => H}}
+                                              , proc_operation_map := POM#{From => [{VC, To} | PO]}
+                                              };
+                                false ->
+                                    %% XXX I do not know how to handle undet message yet ...
+                                    %% This is probably wrong, but I will assign a empty clock for now.
+                                    To = simplify(ToX, SimpMap),
+                                    #{To := IVC} = IBM,
+                                    #{To := MH} = MHM,
+                                    VC1 = IVC,
+                                    H = queue:in(VC1, maps:get(Content, MH, queue:new())),
+                                    ProcState#{ inbox_vc_map := IBM#{To := VC1}
+                                              , message_history_map := MHM#{To := MH#{Content => H}}
+                                              }
+                            end;
 
                         (_, ProcState) ->
                             ProcState
@@ -171,7 +186,8 @@ merge_po_coverage(#state{dump_on_new_coverage = Dump}, Tab, AccTab, SimpMap) ->
                   true ->
                       case Dump of
                           true ->
-                              io:format("New po trace ~p~n"
+                              io:format(user,
+                                        "New po trace ~p~n"
                                         "  original ~p~n",
                                         [POM, ets:match(Tab, '$1')]);
                           false ->
@@ -186,7 +202,8 @@ merge_po_coverage(#state{dump_on_new_coverage = Dump}, Tab, AccTab, SimpMap) ->
     case R of
         ok -> ok;
         _ ->
-            io:format("Got error ~p~n"
+            io:format(user,
+                      "Got error ~p~n"
                       "  while processing trace~n"
                       "  ~p~n",
                       [R, ets:match(Tab, '$1')])
