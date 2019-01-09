@@ -62,7 +62,7 @@ main(["show-states", AccFilename]) ->
               "  cover/it variance: ~w~n",
               [TabCount, HitMean, HitVariance, IterationMean, IterationVariance]);
 main(["aggregate-states" | AccFilenames]) ->
-    Data = aggregate_acc_files(AccFilenames),
+    Data = aggregate_states_acc_files(AccFilenames),
     CSV = case os:getenv("CSV") of
               false -> false;
               "" -> false;
@@ -110,15 +110,19 @@ main(["aggregate-states" | AccFilenames]) ->
                       Acc
               end, undefined, Data)
     end;
+main(["aggregate-po" | AccFilenames]) ->
+    Data = aggregate_po_acc_files(AccFilenames),
+    io:format("Result = ~p~n", [Data]),
+    ok;
 main(Args) ->
     io:format(standard_error, "Badarg: ~p~n", [Args]).
 
-aggregate_acc_files(Filenames) ->
-    aggregate_acc_files(Filenames, {1, #{}}).
+aggregate_states_acc_files(Filenames) ->
+    aggregate_states_acc_files(Filenames, {1, #{}}).
 
-aggregate_acc_files([], {_, Result}) ->
+aggregate_states_acc_files([], {_, Result}) ->
     Result;
-aggregate_acc_files([Filename | Others], {Index, Result}) ->
+aggregate_states_acc_files([Filename | Others], {Index, Result}) ->
     {ok, AccTab} = ets:file2tab(Filename, [{verify,true}]),
     {StateCount, NewResult} =
         ets:foldl(
@@ -130,4 +134,21 @@ aggregate_acc_files([Filename | Others], {Index, Result}) ->
           end, {0, Result}, AccTab),
     [{state_coverage_counter, TabCount}] = ets:lookup(AccTab, state_coverage_counter),
     TabCount = StateCount,
-    aggregate_acc_files(Others, {Index + 1, NewResult}).
+    aggregate_states_acc_files(Others, {Index + 1, NewResult}).
+
+aggregate_po_acc_files(Filenames) ->
+    aggregate_po_acc_files(Filenames, {1, #{}}).
+
+aggregate_po_acc_files([], {_Index, Result}) ->
+    Result;
+aggregate_po_acc_files([Filename | Others], {Index, Acc}) ->
+    {ok, AccTab} = ets:file2tab(Filename, [{verify, true}]),
+    Acc1 =
+        ets:foldl(
+          fun ({{po_trace, PO}, _ItList}, Cur) ->
+                  Old = maps:get(PO, Cur, []),
+                  Cur#{PO => [Index | Old]};
+              (_, Cur) ->
+                  Cur
+          end, Acc, AccTab),
+    aggregate_po_acc_files(Others, {Index + 1, Acc1}).

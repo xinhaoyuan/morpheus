@@ -102,7 +102,7 @@ merge_vc(VC1, VC2) ->
               Acc#{K => max(V, maps:get(K, VC2, 0))}
       end, VC2, VC1).
 
-merge_po_coverage(#state{dump_on_new_coverage = Dump}, Tab, AccTab, SimpMap) ->
+merge_po_coverage(#state{dump_on_new_coverage = Dump}, Tab, IC, AccTab, SimpMap) ->
     %% Reconstruct the trace according to vector clocks.
     %% Traces with the same reconstructed vector clocks are po-equivalent.
     %% Thus we can count how many partial orders has been covered.
@@ -182,7 +182,7 @@ merge_po_coverage(#state{dump_on_new_coverage = Dump}, Tab, AccTab, SimpMap) ->
                     fun (Proc, OPList, Acc) ->
                             Acc#{Proc => lists:reverse(OPList)}
                     end, #{}, POMReversed),
-              case ets:insert_new(AccTab, {{po_trace, POM}, 1}) of
+              case ets:insert_new(AccTab, {{po_trace, POM}, [IC]}) of
                   true ->
                       case Dump of
                           true ->
@@ -195,7 +195,10 @@ merge_po_coverage(#state{dump_on_new_coverage = Dump}, Tab, AccTab, SimpMap) ->
                       end,
                       ets:update_counter(AccTab, po_coverage_counter, 1);
                   false ->
-                      ets:update_counter(AccTab, {po_trace, POM}, 1)
+                      case ets:lookup(AccTab, {po_trace, POM}) of
+                          [{_, ItList}] ->
+                              ets:update_element(AccTab, {po_trace, POM}, [{2, [IC | ItList]}])
+                      end
               end,
               ok
           end),
@@ -496,7 +499,7 @@ handle_call({stop, SeedInfo, SHT},
     end,
     case POC of
         true ->
-            merge_po_coverage(State, Tab, AccTab, SimpMap),
+            merge_po_coverage(State, Tab, IC, AccTab, SimpMap),
             [{po_coverage_counter, POCoverageCount}] = ets:lookup(AccTab, po_coverage_counter),
             io:format(user, "po coverage count = ~p~n", [POCoverageCount]);
         false ->
