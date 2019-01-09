@@ -2,8 +2,11 @@
 
 -export([ bootstrap/0
         , bootstrap/1
-        , bootstrap_remote/1
-        , bootstrap_remote_entry/3
+        , bootstrap_remote/1                    % alias to bootstrap_dist
+        , bootstrap_dist/1
+        , bootstrap_dist_entry/3
+        , start_dist_raw/1
+        , start_dist_raw_entry/3
         ]).
 
 -export([ async_task/1
@@ -69,17 +72,39 @@ bootstrap(Node) ->
     {ok, _} = net_kernel:start([Node, shortnames]).
 
 bootstrap_remote(Node) ->
-    Me = self(),
-    Ref = make_ref(),
-    morpheus_guest:start_node(Node, ?MODULE, bootstrap_remote_entry, [Me, Ref, Node]),
-    receive Ref -> ok end.
+    bootstrap_dist(Node).
 
-bootstrap_remote_entry(Parent, Ref, Node) ->
+bootstrap_dist(Node) ->
+    case Node =:= morpheus_guest:get_node() of
+        true ->
+            bootstrap(Node);
+        false ->
+            Me = self(),
+            Ref = make_ref(),
+            morpheus_guest:start_node(Node, ?MODULE, bootstrap_dist_entry, [Me, Ref, Node]),
+            receive Ref -> ok end
+    end.
+
+bootstrap_dist_entry(Parent, Ref, Node) ->
     bootstrap(),
     {ok, _} = net_kernel:start([Node, shortnames]),
     Parent ! Ref,
     %% As the init process, it seems required to keep it alive ...
     receive after infinity -> ok end.
+
+start_dist_raw(Node) ->
+    case Node =:= morpheus_guest:get_node() of
+        true ->
+            erlang:setnode(Node, 0);
+        false ->
+            Ref = make_ref(),
+            morpheus_guest:start_node(Node, ?MODULE, start_dist_raw_entry, [Node, self(), Ref]),
+            receive Ref -> ok end
+    end.
+
+start_dist_raw_entry(Node, From, Ref) ->
+    erlang:setnode(Node, 0),
+    From ! Ref.
 
 async_task(F) when is_function(F) ->
     {_, MRef} = spawn_monitor(F),
