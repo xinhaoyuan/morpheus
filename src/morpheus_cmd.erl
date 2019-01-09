@@ -110,9 +110,15 @@ main(["aggregate-states" | AccFilenames]) ->
                       Acc
               end, undefined, Data)
     end;
-main(["aggregate-po" | AccFilenames]) ->
-    Data = aggregate_po_acc_files(AccFilenames),
-    io:format("Result = ~p~n", [Data]),
+main(["aggregate-po-filter" | Args]) ->
+    {Filenames, Filter} = split_filenames_and_filter(Args),
+    Data = aggregate_po_acc_files(Filenames),
+    Result = filter_aggregated_po(Data, Filter),
+    maps:fold(
+      fun (PO, Info, _) ->
+              io:format("Info: ~w~n  ~p~n", [Info, PO]),
+              undefined
+      end, undefined, Result),
     ok;
 main(Args) ->
     io:format(standard_error, "Badarg: ~p~n", [Args]).
@@ -152,3 +158,50 @@ aggregate_po_acc_files([Filename | Others], {Index, Acc}) ->
                   Cur
           end, Acc, AccTab),
     aggregate_po_acc_files(Others, {Index + 1, Acc1}).
+
+split_filenames_and_filter(Args) ->
+    split_filenames_and_filter(Args, {[], sets:new()}).
+
+split_filenames_and_filter([], {FilenamesRev, Filter}) ->
+    {lists:reverse(FilenamesRev), sets:to_list(Filter)};
+split_filenames_and_filter([[$+ | IndexStr] = FilterItem | Tail], {FilenamesRev, Filter}) ->
+    Index = list_to_integer(IndexStr),
+    case sets:is_element({exc, Index}, Filter) of
+        false ->
+            split_filenames_and_filter(Tail, {FilenamesRev, sets:add_element({inc, Index}, Filter)});
+        true ->
+            %% Conflict
+            io:format("Ignore filter ~s due to conflict~n", [FilterItem]),
+            split_filenames_and_filter(Tail, {FilenamesRev, Filter})
+    end;
+split_filenames_and_filter([[$- | IndexStr] = FilterItem | Tail], {FilenamesRev, Filter}) ->
+    Index = list_to_integer(IndexStr),
+    case sets:is_element({inc, Index}, Filter) of
+        false ->
+            split_filenames_and_filter(Tail, {FilenamesRev, sets:add_element({exc, Index}, Filter)});
+        true ->
+            %% Conflict
+            io:format("Ignore filter ~s due to conflict~n", [FilterItem]),
+            split_filenames_and_filter(Tail, {FilenamesRev, Filter})
+    end;
+split_filenames_and_filter([Filename | Tail], {FilenamesRev, Filter}) ->
+    split_filenames_and_filter(Tail, {[Filename | FilenamesRev], Filter}).
+
+filter_aggregated_po(Data, Filter) ->
+    maps:fold(
+      fun (PO, Info, Acc) ->
+              Match = lists:foldl(
+                        fun (_, false) ->
+                                false;
+                            ({inc, Index}, true) ->
+                                lists:member(Index, Info);
+                            ({exc, Index}, true) ->
+                                not lists:member(Index, Info)
+                        end, true, Filter),
+              case Match of
+                  true ->
+                      Acc#{PO => Info};
+                  false ->
+                      Acc
+              end
+      end, #{}, Data).
