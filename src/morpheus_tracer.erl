@@ -125,7 +125,7 @@ merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, SimpMa
                             ProcState#{ local_vc_map := LVC#{Proc => VC}
                                       , inbox_vc_map := IBM#{Proc => VC}
                                       , message_history_map := MHM#{Proc => #{}}
-                                      %% , proc_operation_map := POM#{Proc => [{VC, Proc}]}
+                                      , proc_operation_map := POM#{Proc => []}
                                       };
 
                         (?TraceRecv(_Id, _Where, ToX, message, Content),
