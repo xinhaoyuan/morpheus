@@ -119,7 +119,6 @@ merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, SimpMa
                     fun (?TraceNewProcess(_, ProcX, _AbsId, CreatorX, _EntryInfo),
                          #{local_vc_map := LVC, inbox_vc_map := IBM, message_history_map := MHM, proc_operation_map := POM} = ProcState) ->
                             %% When a new process is created the created process inherit the creator's VC.
-                            %% (But we explicitly add a stamp depending to itself, which simplifies later accesses)
                             Proc = simplify(ProcX, SimpMap), Creator = simplify(CreatorX, SimpMap),
                             %% The creator could be initial, which has no record in state
                             VC = (maps:get(Creator, LVC, #{})),
