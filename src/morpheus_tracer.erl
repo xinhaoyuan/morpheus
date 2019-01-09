@@ -122,7 +122,7 @@ merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, SimpMa
                             %% (But we explicitly add a stamp depending to itself, which simplifies later accesses)
                             Proc = simplify(ProcX, SimpMap), Creator = simplify(CreatorX, SimpMap),
                             %% The creator could be initial, which has no record in state
-                            VC = (maps:get(Creator, LVC, #{}))#{Proc => 0},
+                            VC = (maps:get(Creator, LVC, #{})),
                             ProcState#{ local_vc_map := LVC#{Proc => VC}
                                       , inbox_vc_map := IBM#{Proc => VC}
                                       , message_history_map := MHM#{Proc => #{}}
@@ -151,11 +151,12 @@ merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, SimpMa
                             case is_pid(FromX) of
                                 true ->
                                     From = simplify(FromX, SimpMap), To = simplify(ToX, SimpMap),
-                                    #{From := #{From := Step} = VC} = LVC,
+                                    #{From := VC} = LVC,
+                                    Step = maps:get(From, VC, 0),
                                     #{From := PO} = POM,
                                     #{To := IVC} = IBM,
                                     #{To := MH} = MHM,
-                                    VC1 = merge_vc(IVC, VC#{From := Step + 1}),
+                                    VC1 = merge_vc(IVC, VC#{From => Step + 1}),
                                     H = queue:in(VC1, maps:get(Content, MH, queue:new())),
                                     ProcState#{ local_vc_map := LVC#{From := VC1}
                                               , inbox_vc_map := IBM#{To := VC1}
