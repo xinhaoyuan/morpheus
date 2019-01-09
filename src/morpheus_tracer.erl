@@ -28,7 +28,7 @@
                , acc_filename    :: string()
                , acc_fork_period :: integer()
                , dump_traces     :: boolean()
-               , dump_on_new_coverage :: boolean()
+               , dump_po_traces  :: boolean()
                , po_coverage     :: boolean()
                , path_coverage   :: boolean()
                , line_coverage   :: boolean()
@@ -102,13 +102,12 @@ merge_vc(VC1, VC2) ->
               Acc#{K => max(V, maps:get(K, VC2, 0))}
       end, VC2, VC1).
 
-merge_po_coverage(#state{dump_on_new_coverage = Dump}, Tab, IC, AccTab, SimpMap) ->
+merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, SimpMap) ->
     %% Reconstruct the trace according to vector clocks.
     %% Traces with the same reconstructed vector clocks are po-equivalent.
     %% Thus we can count how many partial orders has been covered.
     %%
-    %% We ignore process creation and receiving for partial order trace.
-    %% And for now, we only consider send operations.
+    %% For now, we only consider creation, recv, and send operations.
     %% To rebuild recv-send dependency, we need to rebuild the message history for each process.
     %%
     %% XXX I am not sure how to deal with ETS yet. Probably I would treat each ETS table as a process.
@@ -127,20 +126,24 @@ merge_po_coverage(#state{dump_on_new_coverage = Dump}, Tab, IC, AccTab, SimpMap)
                             ProcState#{ local_vc_map := LVC#{Proc => VC}
                                       , inbox_vc_map := IBM#{Proc => VC}
                                       , message_history_map := MHM#{Proc => #{}}
-                                      , proc_operation_map := POM#{Proc => []}};
+                                      , proc_operation_map := POM#{Proc => [{VC, Proc}]}};
 
                         (?TraceRecv(_Id, _Where, ToX, message, Content),
-                         #{local_vc_map := LVC, message_history_map := MHM} = ProcState) ->
+                         #{local_vc_map := LVC, message_history_map := MHM, proc_operation_map := POM} = ProcState) ->
                             %% Receive of the message needs to happens after the sending operation
                             %% Note that for now only message receive is in scope, others (e.g. signals, timeouts) are ignored for now.
                             To = simplify(ToX, SimpMap),
                             #{To := VC} = LVC,
                             #{To := MH} = MHM,
+                            #{To := PO} = POM,
                             #{Content := H} = MH,
                             {{value, MsgVC}, H1} = queue:out(H),
+                            VC1 = merge_vc(VC, MsgVC),
                             %% GVC is not changing for the same reason as creation
-                            ProcState#{ local_vc_map := LVC#{To := merge_vc(VC, MsgVC)}
-                                      , message_history_map := MHM#{To := MH#{Content := H1}}};
+                            ProcState#{ local_vc_map := LVC#{To := VC1}
+                                      , message_history_map := MHM#{To := MH#{Content := H1}}
+                                      , proc_operation_map := POM#{To := [{VC1, To} | PO]}
+                                      };
 
                         (?TraceSend(_, _Where, FromX, ToX, _Type, Content, _Effect),
                          #{local_vc_map := LVC, inbox_vc_map := IBM, message_history_map := MHM, proc_operation_map := POM} = ProcState) ->
@@ -185,16 +188,21 @@ merge_po_coverage(#state{dump_on_new_coverage = Dump}, Tab, IC, AccTab, SimpMap)
               case ets:insert_new(AccTab, {{po_trace, POM}, [IC]}) of
                   true ->
                       case Dump of
-                          true ->
-                              io:format(user,
-                                        "New po trace ~p~n"
-                                        "  original ~p~n",
-                                        [POM, ets:match(Tab, '$1')]);
-                          false ->
+                          _ when Dump =:= new; Dump =:= all ->
+                              io:format(user, "New po trace ~p~n", [POM]),
+                              dump_trace(State, Tab, SimpMap);
+                          _ ->
                               ok
                       end,
                       ets:update_counter(AccTab, po_coverage_counter, 1);
                   false ->
+                      case Dump of
+                          all ->
+                              io:format(user, "po trace ~p~n", [POM, ets:match(Tab, '$1')]),
+                              dump_trace(State, Tab, SimpMap);
+                          _ ->
+                              ok
+                      end,
                       case ets:lookup(AccTab, {po_trace, POM}) of
                           [{_, ItList}] ->
                               ets:update_element(AccTab, {po_trace, POM}, [{2, [IC | ItList]}])
@@ -367,7 +375,9 @@ dump_trace(_State, Tab, SimpMap) ->
               (_, Acc) ->
                   Acc
           end, [], Tab),
-    io:format("Trace: ~p~n", [lists:reverse(TraceRev)]),
+    io:format(user,
+              "Trace: ~p~n",
+              [lists:reverse(TraceRev)]),
     ok.
 
 %% ========
@@ -457,7 +467,7 @@ init(Args) ->
     AccFilename = proplists:get_value(acc_filename, Args, undefined),
     AccForkPeriod = proplists:get_value(acc_fork_period, Args, 0),
     DumpTraces = proplists:get_value(dump_traces, Args, false),
-    DumpOnNewCoverage = proplists:get_value(dump_on_new_coverage, Args, false),
+    DumpPOTraces = proplists:get_value(dump_po_traces, Args, false),
     POCoverage = proplists:get_value(po_coverage, Args, false),
     PathCoverage = proplists:get_value(path_coverage, Args, false),
     LineCoverage = proplists:get_value(line_coverage, Args, false),
@@ -466,7 +476,7 @@ init(Args) ->
                   , acc_filename = AccFilename
                   , acc_fork_period = AccForkPeriod
                   , dump_traces = DumpTraces
-                  , dump_on_new_coverage = DumpOnNewCoverage
+                  , dump_po_traces = DumpPOTraces
                   , po_coverage = POCoverage
                   , path_coverage = PathCoverage
                   , line_coverage = LineCoverage
