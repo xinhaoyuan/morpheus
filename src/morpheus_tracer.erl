@@ -125,7 +125,8 @@ merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, SimpMa
                             ProcState#{ local_vc_map := LVC#{Proc => VC}
                                       , inbox_vc_map := IBM#{Proc => VC}
                                       , message_history_map := MHM#{Proc => #{}}
-                                      , proc_operation_map := POM#{Proc => [{VC, Proc}]}};
+                                      %% , proc_operation_map := POM#{Proc => [{VC, Proc}]}
+                                      };
 
                         (?TraceRecv(_Id, _Where, ToX, message, Content),
                          #{local_vc_map := LVC, message_history_map := MHM, proc_operation_map := POM} = ProcState) ->
@@ -141,7 +142,7 @@ merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, SimpMa
                             %% GVC is not changing for the same reason as creation
                             ProcState#{ local_vc_map := LVC#{To := VC1}
                                       , message_history_map := MHM#{To := MH#{Content := H1}}
-                                      , proc_operation_map := POM#{To := [{VC1, To} | PO]}
+                                      %% , proc_operation_map := POM#{To := [{VC1, To} | PO]}
                                       };
 
                         (?TraceSend(_, _Where, FromX, ToX, _Type, Content, _Effect),
@@ -155,12 +156,13 @@ merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, SimpMa
                                     #{From := PO} = POM,
                                     #{To := IVC} = IBM,
                                     #{To := MH} = MHM,
-                                    VC1 = merge_vc(IVC, VC#{From => Step + 1}),
-                                    H = queue:in(VC1, maps:get(Content, MH, queue:new())),
-                                    ProcState#{ local_vc_map := LVC#{From := VC1}
-                                              , inbox_vc_map := IBM#{To := VC1}
+                                    VC1 = merge_vc(IVC, VC),
+                                    VC2 = VC1#{From => Step + 1},
+                                    H = queue:in(VC2, maps:get(Content, MH, queue:new())),
+                                    ProcState#{ local_vc_map := LVC#{From := VC2}
+                                              , inbox_vc_map := IBM#{To := VC2}
                                               , message_history_map := MHM#{To := MH#{Content => H}}
-                                              , proc_operation_map := POM#{From => [{VC, To} | PO]}
+                                              , proc_operation_map := POM#{From => [{VC1, To} | PO]}
                                               };
                                 false ->
                                     %% XXX I do not know how to handle undet message yet ...
