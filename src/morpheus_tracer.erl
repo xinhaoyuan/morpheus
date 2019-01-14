@@ -129,20 +129,18 @@ merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, SimpMa
                                       };
 
                         (?TraceRecv(_Id, _Where, ToX, message, Content),
-                         #{local_vc_map := LVC, message_history_map := MHM, proc_operation_map := POM} = ProcState) ->
+                         #{local_vc_map := LVC, message_history_map := MHM} = ProcState) ->
                             %% Receive of the message needs to happens after the sending operation
                             %% Note that for now only message receive is in scope, others (e.g. signals, timeouts) are ignored for now.
                             To = simplify(ToX, SimpMap),
                             #{To := VC} = LVC,
                             #{To := MH} = MHM,
-                            #{To := PO} = POM,
                             #{Content := H} = MH,
                             {{value, MsgVC}, H1} = queue:out(H),
                             VC1 = merge_vc(VC, MsgVC),
                             %% GVC is not changing for the same reason as creation
                             ProcState#{ local_vc_map := LVC#{To := VC1}
                                       , message_history_map := MHM#{To := MH#{Content := H1}}
-                                      %% , proc_operation_map := POM#{To := [{VC1, To} | PO]}
                                       };
 
                         (?TraceSend(_, _Where, FromX, ToX, _Type, Content, _Effect),
@@ -200,7 +198,7 @@ merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, SimpMa
                   false ->
                       case Dump of
                           all ->
-                              io:format(user, "po trace ~p~n", [POM, ets:match(Tab, '$1')]),
+                              io:format(user, "po trace ~p~n", [POM]),
                               dump_trace(State, Tab, SimpMap);
                           _ ->
                               ok

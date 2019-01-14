@@ -21,6 +21,7 @@ init() ->
 
 -record(timer_entry,
         { deadline    :: integer()
+        , interval    :: undefined | integer()
         , dest        :: pid() | atom()
         , ref         :: reference()
         , msg         :: any()
@@ -57,25 +58,34 @@ init_timer() ->
                               {[#timer_entry{}], dict:dict(pid(), {non_neg_integer(), reference()}), #timer_state{}}.
 %% Find all timer entries that timed out, fire them and remove the corresponding monitors
 process_timeouts(#timer_state{timers = Timers0, monitors = Monitors0}, Now) ->
-    {Expired, Timers, NextDeadline} =
+    {Triggered, Remained, NextDeadline} =
         lists:foldr(
-          fun (#timer_entry{deadline = DL} = Timer, {E, T, N}) ->
+          fun (#timer_entry{deadline = DL, interval = Itv} = Timer, {T, R, N}) ->
                   if
+                      DL =< Now, Itv =:= undefined ->
+                          {[Timer | T], R, N};
                       DL =< Now ->
-                          {[Timer | E], T, N};
+                          NextDL = DL + (Now - DL + Itv) div Itv * Itv,
+                          NewTimer = Timer#timer_entry{deadline = NextDL},
+                          event({timer_interval_review, Timer, NewTimer}),
+                          {[Timer | T], [NewTimer | R],
+                           case N =:= infinity orelse NextDL < N of
+                               true -> NextDL;
+                               false -> N
+                           end};
                       N =:= infinite ->
-                          {E, [Timer | T], DL};
+                          {T, [Timer | R], DL};
                       DL < N ->
-                          {E, [Timer | T], DL};
+                          {T, [Timer | R], DL};
                       true ->
-                          {E, [Timer | T], N}
+                          {T, [Timer | R], N}
                   end
           end, {[], [], infinity}, Timers0),
     %% XXX shuffle the expired list to fire them randomly?
     Monitors = lists:foldr(
-      fun ( #timer_entry{dest = Dest, ref = Ref, msg = Msg, with_header = WithHeader}
+      fun ( #timer_entry{interval = Itv, dest = Dest, ref = Ref, msg = Msg, with_header = WithHeader}
           , CurMonitors) ->
-              event({timer_expired, Ref}),
+              event({timer_triggered, Ref}),
               %% Dest may be a non-exist process name. By API documentation it's silently ignored
               _ = (catch
                        case WithHeader of
@@ -84,7 +94,7 @@ process_timeouts(#timer_state{timers = Timers0, monitors = Monitors0}, Now) ->
                            false ->
                                Dest ! Msg
                        end),
-              case is_pid(Dest) andalso dict:take(Dest, CurMonitors) of
+              case Itv =:= undefined andalso is_pid(Dest) andalso dict:take(Dest, CurMonitors) of
                   false ->
                       CurMonitors;
                   {{C, MRef}, NxMonitors} when C =:= 1 ->
@@ -93,8 +103,8 @@ process_timeouts(#timer_state{timers = Timers0, monitors = Monitors0}, Now) ->
                   {{C, MRef}, NxMonitors} when C > 1 ->
                       dict:store(Dest, {C - 1, MRef}, NxMonitors)
               end
-      end, Monitors0, Expired),
-    {Timers, Monitors, NextDeadline}.
+      end, Monitors0, Triggered),
+    {Remained, Monitors, NextDeadline}.
 
 -spec timer_loop(#timer_state{}, non_neg_integer()) -> none().
 timer_loop(S, Now) ->
@@ -107,15 +117,21 @@ timer_loop(S, Now) ->
                 NextDeadline - Now
         end,
     receive
-        {Ref, Pid, {new, Abs, Time, Dest, Msg, WithHeader}} ->
+        {Ref, Pid, {new, Opts, Time, Dest, Msg, WithHeader}} ->
             Now0 = erlang:monotonic_time(millisecond),
             TRef = make_ref(),
             event({new_timer, Time, TRef}),
-            Timer = #timer_entry{ deadline = case Abs of
+            Timer = #timer_entry{ deadline = case proplists:get_value(abs, Opts, false) of
                                                  true ->
                                                      Time;
                                                  false ->
                                                      Now0 + Time
+                                             end
+                                , interval = case proplists:get_value(interval, Opts, false) andalso Time > 0 of
+                                                 true ->
+                                                     Time;
+                                                 false ->
+                                                     undefined
                                              end
                                 , dest = Dest
                                 , ref = TRef
@@ -221,16 +237,12 @@ send_after(Time, Dest, Msg, Opts) ->
     start_timer(Time, Dest, Msg, Opts, false).
 
 start_timer(Time, Dest, Msg, Opts, WithHeader) ->
-    Abs = case proplists:get_value(abs, Opts, false) of
-              true -> true;
-              _ -> false
-          end,
     case whereis(?MODULE) of
         undefined ->
             morpheus_guest:exit_with(timer_controller_not_found);
         Pid ->
             MRef = monitor(process, Pid),
-            Pid ! {MRef, self(), {new, Abs, Time, Dest, Msg, WithHeader}},
+            Pid ! {MRef, self(), {new, Opts, Time, Dest, Msg, WithHeader}},
             receive
                 {MRef, TRef} ->
                     demonitor(MRef, [flush]),
