@@ -612,21 +612,20 @@ ctl_pop_request_from_buffer(#sandbox_state{waiting_counter = WC, waiting = Waiti
         error ->
             error(pop_request_failed);
         {{Where, ReplyTo, Req}, NewWaiting} ->
-            S1 = detect_req_race(S, Where, Req, NewWaiting),
             case ReplyTo of
                 undet ->
                     %% undet async request
-                    {S1#sandbox_state{
+                    {S#sandbox_state{
                        waiting_counter = WC - 1,
                        waiting = NewWaiting},
                      Where, ReplyTo, Ref, Req};
                 timeout ->
-                    {S1#sandbox_state{
+                    {S#sandbox_state{
                        waiting_counter = WC - 1,
                        waiting = NewWaiting},
                      Where, ReplyTo, Ref, Req};
                 _ ->
-                    {S1#sandbox_state{
+                    {S#sandbox_state{
                        alive = [ReplyTo | S#sandbox_state.alive],
                        alive_counter = S#sandbox_state.alive_counter + 1,
                        waiting_counter = WC - 1,
@@ -637,10 +636,9 @@ ctl_pop_request_from_buffer(#sandbox_state{waiting_counter = WC, waiting = Waiti
 
 ctl_push_request_to_scheduler(#sandbox_state{ opt = #sandbox_opt{fd_scheduler = Sched}
                                             , proc_shtable = SHT
-                                            , weight_table = WT
                                             , scheduler_push_counter = SPC} = S,
                               Req) when Sched =/= undefined ->
-    #fd_delay_req{data = #{where := Where, from := From} = Data} = Req,
+    #fd_delay_req{data = #{from := From} = Data} = Req,
     Data1 =
         case is_pid(From) andalso ?SHTABLE_GET(SHT, {scoped_weight, From}) of
             {_, W} ->
@@ -648,21 +646,7 @@ ctl_push_request_to_scheduler(#sandbox_state{ opt = #sandbox_opt{fd_scheduler = 
                 ?SHTABLE_REMOVE(SHT, {scoped_weight, From}),
                 Data#{weight => W + 1};
             _ ->
-                Weight =
-                    case ?SHTABLE_GET(SHT, race_weighted) of
-                        {_, true} ->
-                            case dict:find(Where, WT) of
-                                {ok, W} ->
-                                    %% ?INFO("Delay req ~p with weight ~p", [Req, W]),
-                                    W;
-                                error ->
-                                    %% ?INFO("Delay req ~p without weight", [Req]),
-                                    1
-                            end;
-                        _ ->
-                            1
-                    end,
-                Data#{weight => Weight}
+                Data
         end,
     Sched ! Req#fd_delay_req{data = Data1},
     S#sandbox_state{scheduler_push_counter = SPC + 1}.
@@ -2002,7 +1986,7 @@ ctl_process_send_signal( #sandbox_state
     end.
 
 ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT, proc_shtable = SHT} = S, Reason) ->
-    %% Not needed for now
+    %% weight_table is inactive now.
     %% #sandbox_state{weight_table = WT} = S,
     %% ?INFO("Weight table:~n  ~p", [dict:to_list(WT)]),
     case Reason of
@@ -2090,29 +2074,6 @@ tcp_recv(Sock, Bs) ->
         {error, closed} ->
             {ok, list_to_binary(Bs)}
     end.
-
-%% research code - message race detection
-
--define(weight_race, 10).
-
-detect_req_race(S, Where, ?cci_send_msg(_, To, _Msg), WaitingReqs) ->
-    dict:fold(
-      fun (_, {OWhere, _, ?cci_send_msg(_, OTo, _OMsg)}, CurS)
-            when OTo =:= To ->
-              %% concurrent message sending to the same receiver
-              %% ?INFO("Found message race between ~p and ~p~n", [Where, OWhere]),
-              %% Self = {Where, ?H:replace_pid(Msg, fun (P) when is_pid(P) -> '$pid$'; (P) when is_port(P) -> '$port$'; (P) when is_reference(P) -> '$ref$'; (P) -> P end)},
-              %% Other = {OWhere, ?H:replace_pid(OMsg, fun (P) when is_pid(P) -> '$pid$'; (P) when is_port(P) -> '$port$'; (P) when is_reference(P) -> '$ref$'; (P) -> P end)},
-              #sandbox_state{weight_table = WT} = CurS,
-              CurS#sandbox_state{
-                weight_table =
-                    dict:store(Where, ?weight_race, dict:store(OWhere, ?weight_race, WT))
-               };
-          (_, _, CurS) ->
-              CurS
-      end, S, WaitingReqs);
-detect_req_race(S, _, _, _) ->
-    S.
 
 %% instrumentation callbacks - called by morpheus_instrument
 
@@ -3161,35 +3122,37 @@ handle_io(F, A, _Aux) ->
             apply(io, F, [user | A])
     end.
 
-detect_file_op_race(Where, IoDev, Start, Size, Type) ->
-    IOList = [{{iodev, IoDev}, Start, Size, Type}],
-    {ok, R} = ?cc_resource_acquire(get_ctl(), Where, IOList),
-    case R of
-        [] -> ok;
-        _ ->
-            {_, _, ST} = ?CATCH( throw(gimme_stacktrace) ),
-            ?WARNING("Race on file operation found~nStack: ~p", [ST])
-    end,
-    {ok, ok} = ?cc_resource_release(get_ctl(), Where, IOList).
+%% Inactive race detection
+%% detect_file_op_race(Where, IoDev, Start, Size, Type) ->
+%%     IOList = [{{iodev, IoDev}, Start, Size, Type}],
+%%     {ok, R} = ?cc_resource_acquire(get_ctl(), Where, IOList),
+%%     case R of
+%%         [] -> ok;
+%%         _ ->
+%%             {_, _, ST} = ?CATCH( throw(gimme_stacktrace) ),
+%%             ?WARNING("Race on file operation found~nStack: ~p", [ST])
+%%     end,
+%%     {ok, ok} = ?cc_resource_release(get_ctl(), Where, IOList).
 
-handle_file(F, A, {_Old, _New, Ann}) ->
-    case F of
-        pread when length(A) =:= 3 ->
-            [IoDev, _Start, _Size] = A,
-            detect_file_op_race(Ann, IoDev, 1, 1, read);
-        pwrite when length(A) =:= 3 ->
-            [IoDev, _Start, _Data] = A,
-            detect_file_op_race(Ann, IoDev, 1, 1, write);
-        read ->
-            [IoDev, _Size] = A,
-            {ok, _Start} = file:position(IoDev, cur),
-            detect_file_op_race(Ann, IoDev, 1, 1, read);
-        write ->
-            [IoDev, _Data] = A,
-            {ok, _Start} = file:position(IoDev, cur),
-            detect_file_op_race(Ann, IoDev, 1, 1, write);
-        _ -> ok
-    end,
+handle_file(F, A, {_Old, _New, _Ann}) ->
+    %% Inactive race detection
+    %% case F of
+    %%     pread when length(A) =:= 3 ->
+    %%         [IoDev, _Start, _Size] = A,
+    %%         detect_file_op_race(Ann, IoDev, 1, 1, read);
+    %%     pwrite when length(A) =:= 3 ->
+    %%         [IoDev, _Start, _Data] = A,
+    %%         detect_file_op_race(Ann, IoDev, 1, 1, write);
+    %%     read ->
+    %%         [IoDev, _Size] = A,
+    %%         {ok, _Start} = file:position(IoDev, cur),
+    %%         detect_file_op_race(Ann, IoDev, 1, 1, read);
+    %%     write ->
+    %%         [IoDev, _Data] = A,
+    %%         {ok, _Start} = file:position(IoDev, cur),
+    %%         detect_file_op_race(Ann, IoDev, 1, 1, write);
+    %%     _ -> ok
+    %% end,
     apply(file, F, A).
 
 %% sandboxed lib ets handling
@@ -3348,7 +3311,8 @@ start_node(Node, M, F, A) ->
 
 set_flag(tracing, Enabled) ->
     SHT = get_shtab(),
-    ?SHTABLE_SET(SHT, tracing, Enabled);
-set_flag(race_weighted, Enabled) ->
-    SHT = get_shtab(),
-    ?SHTABLE_SET(SHT, race_weighted, Enabled).
+    ?SHTABLE_SET(SHT, tracing, Enabled),
+    ok;
+set_flag(_Flag, _Value) ->
+    ?WARNING("Ignored flag setting ~w => ~p", [_Flag, _Value]),
+    ignored.
