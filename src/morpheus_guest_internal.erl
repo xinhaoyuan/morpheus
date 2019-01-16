@@ -22,7 +22,7 @@ init() ->
 -record(timer_entry,
         { deadline    :: integer()
         , interval    :: undefined | integer()
-        , repeat      :: undefined | infinity | integer()
+        , repeat      :: undefined | integer()
         , dest        :: pid() | atom()
         , ref         :: reference()
         , msg         :: any()
