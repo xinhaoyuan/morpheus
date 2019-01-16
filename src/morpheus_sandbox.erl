@@ -232,7 +232,6 @@ ctl_trace_new_process(#sandbox_opt{trace_send = TSend, trace_receive = TRecv, tr
                     ?INFO("~w created: ~w~n"
                           "  node: ~w~n"
                           "  creator: ~p~n"
-                          "  entry_hash: ~w~n"
                           "  entry: ~p",
                           [Proc, AbsId, Node, Creator, EntryInfo]);
                 _ -> ok
