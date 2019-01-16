@@ -3117,6 +3117,7 @@ handle_io(F, A, _Aux) ->
         [standard_io | R] ->
             apply(io, F, [user | R]);
         [IODev | _] when is_pid(IODev); is_atom(IODev) ->
+            %% XXX this condition is very problematic! since format can also be an atom ...  
             apply(io, F, A);
         _ ->
             apply(io, F, [user | A])

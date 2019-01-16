@@ -22,6 +22,7 @@ init() ->
 -record(timer_entry,
         { deadline    :: integer()
         , interval    :: undefined | integer()
+        , repeat      :: undefined | infinity | integer()
         , dest        :: pid() | atom()
         , ref         :: reference()
         , msg         :: any()
@@ -60,13 +61,22 @@ init_timer() ->
 process_timeouts(#timer_state{timers = Timers0, monitors = Monitors0}, Now) ->
     {Triggered, Remained, NextDeadline} =
         lists:foldr(
-          fun (#timer_entry{deadline = DL, interval = Itv} = Timer, {T, R, N}) ->
+          fun (#timer_entry{deadline = DL, interval = Itv, repeat = Repeat} = Timer, {T, R, N}) ->
                   if
                       DL =< Now, Itv =:= undefined ->
                           {[Timer | T], R, N};
+                      DL =< Now, Repeat =< 1 ->
+                          {[Timer#timer_entry{interval = undefined, repeat = undefined} | T], R, N};
                       DL =< Now ->
                           NextDL = DL + (Now - DL + Itv) div Itv * Itv,
-                          NewTimer = Timer#timer_entry{deadline = NextDL},
+                          NewTimer = Timer#timer_entry{
+                                       deadline = NextDL,
+                                       repeat =
+                                           case Repeat of
+                                               undefined -> Repeat;
+                                               _ -> Repeat - 1
+                                           end
+                                      },
                           event({timer_interval_review, Timer, NewTimer}),
                           {[Timer | T], [NewTimer | R],
                            case N =:= infinity orelse NextDL < N of
@@ -133,6 +143,10 @@ timer_loop(S, Now) ->
                                                  false ->
                                                      undefined
                                              end
+                                , repeat = case proplists:get_value(repeat, Opts, undefined) of
+                                               infinity -> undefined;
+                                               _Repeat -> _Repeat
+                                           end
                                 , dest = Dest
                                 , ref = TRef
                                 , msg = Msg
@@ -315,65 +329,3 @@ cancel_timer(TRef, Opts) when is_reference(TRef) ->
     end;
 cancel_timer(_Other, _Opts) ->
     error(badarg).
-
-%%%% Naive timer emulation for future reference
-
-%% start_timer(Time, Dest, Msg) ->
-%%     start_timer(Time, Dest, Msg, []).
-
-%% start_timer(Time, Dest, Msg, Opts) ->
-%%     case proplists:get_value(abs, Opts) of
-%%         true ->
-%%             io:format(user, "!!!! abs_timer !!!!~n", []),
-%%             error(unhandled_abs_timer);
-%%         _ ->
-%%             ok
-%%     end,
-%%     spawn(fun () ->
-%%                   receive
-%%                   after Time ->
-%%                           Dest ! {timeout, self(), Msg}
-%%                   end
-%%           end).
-
-%% send_after(Time, Dest, Msg) ->
-%%     send_after(Time, Dest, Msg, []).
-
-%% send_after(Time, Dest, Msg, Opts) ->
-%%     case proplists:get_value(abs, Opts, false) of
-%%         true ->
-%%             io:format(user, "!!!! abs_timer !!!!~n", []),
-%%             error(unhandled_abs_timer);
-%%         false ->
-%%             ok
-%%     end,
-%%     spawn(fun () ->
-%%                   receive
-%%                   after Time ->
-%%                           Dest ! Msg
-%%                   end
-%%           end).
-
-%% read_timer(Timer) ->
-%%     read_timer(Timer, []).
-%% read_timer(_Timer, _Options) ->
-%%     error(unhandled_read_timer).
-
-%% cancel_timer(Timer) ->
-%%     cancel_timer(Timer, []).
-
-%% cancel_timer(Timer, Opts) ->
-%%     Async = proplists:get_value(async, Opts, false),
-%%     Info = proplists:get_value(async, Opts, true),
-%%     exit(Timer, cancel_timer),
-%%     case Info of
-%%         false -> ok;
-%%         true ->
-%%             case Async of
-%%                 false ->
-%%                     0;
-%%                 true ->
-%%                     self() ! {cancel_timer, Timer, 0},
-%%                     ok
-%%             end
-%%     end.
