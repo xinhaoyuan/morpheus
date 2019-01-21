@@ -9,7 +9,7 @@
         , trace_send/7
         , trace_receive/5
         , trace_report_state/3
-        , stop/3
+        , finalize/3
         , create_ets_tab/0
         , create_acc_ets_tab/0
         , open_or_create_acc_ets_tab/1
@@ -28,7 +28,9 @@
                , acc_filename    :: string()
                , acc_fork_period :: integer()
                , dump_traces     :: boolean()
-               , dump_po_traces  :: boolean()
+               , dump_traces_verbose :: boolean()
+               , dump_po_traces  :: new | all | false
+               , find_races      :: boolean()
                , po_coverage     :: boolean()
                , path_coverage   :: boolean()
                , line_coverage   :: boolean()
@@ -60,8 +62,8 @@ trace_receive(T, Where, To, Type, Content) ->
 trace_report_state(T, Depth, State) ->
     gen_server:cast(T, {report_state, Depth, State}).
 
-stop(T, SeedInfo, SHT) ->
-    gen_server:call(T, {stop, SeedInfo, SHT}, infinity).
+finalize(T, SeedInfo, SHT) ->
+    gen_server:call(T, {finalize, SeedInfo, SHT}, infinity).
 
 create_ets_tab() ->
     Tab = ets:new(trace_tab, [ordered_set, public, {write_concurrency, true}]),
@@ -94,16 +96,21 @@ open_or_create_acc_ets_tab(Filename) ->
               create_acc_ets_tab()
       end).
 
-%% ==== Partial Order Coverage ====
+%% ==== Partial Order Analysis ====
 
+%% RET[k] := undefined (k not in VC1 /\ k not in VC2)
+%%        |  VC1[k]    (k in VC1     /\ k not in VC2)
+%%        |  VC2[k]    (k not in VC1 /\ k in VC2)
+%%        |  max(VC1[k], VC2[k])
 merge_vc(VC1, VC2) ->
     maps:fold(
       fun (K, V, Acc) ->
               Acc#{K => max(V, maps:get(K, VC2, 0))}
       end, VC2, VC1).
 
-merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, SimpMap) ->
+analyze_partial_order(_State, Tab, SimpMap) ->
     %% Reconstruct the trace according to vector clocks.
+    %% And detect racing operations.
     %% Traces with the same reconstructed vector clocks are po-equivalent.
     %% Thus we can count how many partial orders has been covered.
     %%
@@ -111,115 +118,160 @@ merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, SimpMa
     %% To rebuild recv-send dependency, we need to rebuild the message history for each process.
     %%
     %% XXX I am not sure how to deal with ETS yet. Probably I would treat each ETS table as a process.
-    R = (
-      catch
-          begin
-              #{proc_operation_map := POMReversed} =
-                  ets:foldl(
-                    fun (?TraceNewProcess(_, ProcX, _AbsId, CreatorX, _EntryInfo),
-                         #{local_vc_map := LVC, inbox_vc_map := IBM, message_history_map := MHM, proc_operation_map := POM} = ProcState) ->
-                            %% When a new process is created the created process inherit the creator's VC.
-                            Proc = simplify(ProcX, SimpMap), Creator = simplify(CreatorX, SimpMap),
-                            %% The creator could be initial, which has no record in state
-                            VC = (maps:get(Creator, LVC, #{})),
-                            ProcState#{ local_vc_map := LVC#{Proc => VC}
-                                      , inbox_vc_map := IBM#{Proc => VC}
-                                      , message_history_map := MHM#{Proc => #{}}
-                                      , proc_operation_map := POM#{Proc => []}
-                                      };
+    #{proc_operation_map := POMReversed, races := Races} =
+        ets:foldl(
+          fun (?TraceNewProcess(_, ProcX, _AbsId, CreatorX, _EntryInfo),
+               #{local_vc_map := LVC, inbox_vc_map := IBM, message_queue_map := MQM, message_history_map := MHM, proc_operation_map := POM} = ProcState) ->
+                  %% When a new process is created the created process inherit the creator's VC.
+                  Proc = simplify(ProcX, SimpMap), Creator = simplify(CreatorX, SimpMap),
+                  %% The creator could be initial, which has no record in state
+                  VC = (maps:get(Creator, LVC, #{})),
+                  ProcState#{ local_vc_map := LVC#{Proc => VC}
+                            , inbox_vc_map := IBM#{Proc => VC}
+                            , message_queue_map := MQM#{Proc => #{}}
+                            , message_history_map := MHM#{Proc => []}
+                            , proc_operation_map := POM#{Proc => []}
+                            };
 
-                        (?TraceRecv(_Id, _Where, ToX, message, Content),
-                         #{local_vc_map := LVC, message_history_map := MHM} = ProcState) ->
-                            %% Receive of the message needs to happens after the sending operation
-                            %% Note that for now only message receive is in scope, others (e.g. signals, timeouts) are ignored for now.
-                            To = simplify(ToX, SimpMap),
-                            #{To := VC} = LVC,
-                            #{To := MH} = MHM,
-                            #{Content := H} = MH,
-                            {{value, MsgVC}, H1} = queue:out(H),
-                            VC1 = merge_vc(VC, MsgVC),
-                            %% GVC is not changing for the same reason as creation
-                            ProcState#{ local_vc_map := LVC#{To := VC1}
-                                      , message_history_map := MHM#{To := MH#{Content := H1}}
-                                      };
+              (?TraceRecv(_Id, _Where, ToX, message, Content),
+               #{local_vc_map := LVC, message_queue_map := MQM} = ProcState) ->
+                  %% Receive of the message needs to happens after the sending operation
+                  %% Note that for now only message receive is in scope, others (e.g. signals, timeouts) are ignored for now.
+                  To = simplify(ToX, SimpMap),
+                  #{To := VC} = LVC,
+                  #{To := MQ} = MQM,
+                  #{Content := Q} = MQ,
+                  {{value, MsgVC}, H1} = queue:out(Q),
+                  VC1 = merge_vc(VC, MsgVC),
+                  %% GVC is not changing for the same reason as creation
+                  ProcState#{ local_vc_map := LVC#{To := VC1}
+                            , message_queue_map := MQM#{To := MQ#{Content := H1}}
+                            };
 
-                        (?TraceSend(_, _Where, FromX, ToX, _Type, Content, _Effect),
-                         #{local_vc_map := LVC, inbox_vc_map := IBM, message_history_map := MHM, proc_operation_map := POM} = ProcState) ->
-                            %% Sending message to a process will make it happen after all sending of existing messages, which is in inbox_vc_map
-                            case is_pid(FromX) of
-                                true ->
-                                    From = simplify(FromX, SimpMap), To = simplify(ToX, SimpMap),
-                                    #{From := VC} = LVC,
-                                    Step = maps:get(From, VC, 0),
-                                    #{From := PO} = POM,
-                                    #{To := IVC} = IBM,
-                                    #{To := MH} = MHM,
-                                    VC1 = merge_vc(IVC, VC),
-                                    VC2 = VC1#{From => Step + 1},
-                                    H = queue:in(VC2, maps:get(Content, MH, queue:new())),
-                                    ProcState#{ local_vc_map := LVC#{From := VC2}
-                                              , inbox_vc_map := IBM#{To := VC2}
-                                              , message_history_map := MHM#{To := MH#{Content => H}}
-                                              , proc_operation_map := POM#{From => [{VC1, To} | PO]}
-                                              };
-                                false ->
-                                    %% XXX I do not know how to handle undet message yet ...
-                                    %% This is probably wrong, but I will assign a empty clock for now.
-                                    To = simplify(ToX, SimpMap),
-                                    #{To := IVC} = IBM,
-                                    #{To := MH} = MHM,
-                                    VC1 = IVC,
-                                    H = queue:in(VC1, maps:get(Content, MH, queue:new())),
-                                    ProcState#{ inbox_vc_map := IBM#{To := VC1}
-                                              , message_history_map := MHM#{To := MH#{Content => H}}
-                                              }
-                            end;
+              (?TraceSend(TID, _Where, FromX, ToX, _Type, Content, _Effect),
+               #{local_vc_map := LVC, inbox_vc_map := IBM, message_queue_map := MQM, message_history_map := MHM, proc_operation_map := POM, races := Races} = ProcState) ->
+                  %% Sending message to a process will make it happen after all sending of existing messages, which is in inbox_vc_map
+                  case is_pid(FromX) of
+                      true ->
+                          From = simplify(FromX, SimpMap), To = simplify(ToX, SimpMap),
+                          #{From := VC} = LVC,
+                          Step = maps:get(From, VC, 0),
+                          #{From := PO} = POM,
+                          #{To := IVC} = IBM,
+                          #{To := MQ} = MQM,
+                          #{To := MH} = MHM,
+                          VC1 = merge_vc(IVC, VC),
+                          VC2 = VC1#{From => Step + 1},
+                          RacingOps =
+                              lists:foldl(
+                                fun ({SenderProc, SenderIdx, SenderTID}, Acc) ->
+                                        %% Check if the current send can happens before each message in the queue
+                                        HappensAfter = maps:get(SenderProc, VC, 0),
+                                        case SenderIdx >= HappensAfter of
+                                            true ->
+                                                [SenderTID | Acc];
+                                            false ->
+                                                Acc
+                                        end
+                                end, [], MH),
+                          Q = queue:in(VC2, maps:get(Content, MQ, queue:new())),
+                          ProcState#{ local_vc_map := LVC#{From := VC2}
+                                    , inbox_vc_map := IBM#{To := VC2}
+                                    , message_queue_map := MQM#{To := MQ#{Content => Q}}
+                                    , message_history_map := MHM#{To := [{From, Step, TID} | MH]}
+                                    , proc_operation_map := POM#{From => [{VC1, To} | PO]}
+                                    , races :=
+                                          case RacingOps of
+                                              [] ->
+                                                  Races;
+                                              _ ->
+                                                  [{TID, RacingOps} | Races]
+                                          end
+                                    };
+                      false ->
+                          %% XXX I do not know how to handle undet message yet ...
+                          %% This is probably wrong, but I will assign a empty clock for now.
+                          To = simplify(ToX, SimpMap),
+                          #{To := IVC} = IBM,
+                          #{To := MQ} = MQM,
+                          VC1 = IVC,
+                          Q = queue:in(VC1, maps:get(Content, MQ, queue:new())),
+                          ProcState#{ inbox_vc_map := IBM#{To := VC1}
+                                    , message_queue_map := MQM#{To := MQ#{Content => Q}}
+                                    }
+                  end;
 
-                        (_, ProcState) ->
-                            ProcState
-                    end,
-                    #{local_vc_map => #{}, inbox_vc_map => #{}, message_history_map => #{}, proc_operation_map => #{}},
-                    Tab),
-              POM =
-                  maps:fold(
-                    fun (Proc, OPList, Acc) ->
-                            Acc#{Proc => lists:reverse(OPList)}
-                    end, #{}, POMReversed),
-              case ets:insert_new(AccTab, {{po_trace, POM}, [IC]}) of
-                  true ->
-                      case Dump of
-                          _ when Dump =:= new; Dump =:= all ->
-                              io:format(user, "New po trace ~p~n", [POM]),
-                              dump_trace(State, Tab, SimpMap);
-                          _ ->
-                              ok
-                      end,
-                      ets:update_counter(AccTab, po_coverage_counter, 1);
-                  false ->
-                      case Dump of
-                          all ->
-                              io:format(user, "po trace ~p~n", [POM]),
-                              dump_trace(State, Tab, SimpMap);
-                          _ ->
-                              ok
-                      end,
-                      case ets:lookup(AccTab, {po_trace, POM}) of
-                          [{_, ItList}] ->
-                              ets:update_element(AccTab, {po_trace, POM}, [{2, [IC | ItList]}])
-                      end
-              end,
-              ok
-          end),
-    case R of
-        ok -> ok;
-        _ ->
-            io:format(user,
-                      "Got error ~p~n"
-                      "  while processing trace~n"
-                      "  ~p~n",
-                      [R, ets:match(Tab, '$1')])
+              (_, ProcState) ->
+                  ProcState
+          end,
+          #{ local_vc_map => #{}
+           , inbox_vc_map => #{}
+           , message_queue_map => #{}
+           , message_history_map => #{}
+           , proc_operation_map => #{}
+           , races => []
+           },
+          Tab),
+    POM =
+        maps:fold(
+          fun (Proc, OPList, Acc) ->
+                  Acc#{Proc => lists:reverse(OPList)}
+          end, #{}, POMReversed),
+    io:format(user, "Races: ~p~n", [Races]),
+    {ok, {POM, Races}}.
+
+merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, #{partial_order_map := POM, simp_map := SimpMap}) ->
+    %% Thus we can count how many partial orders has been covered.
+    case ets:insert_new(AccTab, {{po_trace, POM}, [IC]}) of
+        true ->
+            case Dump of
+                _ when Dump =:= new; Dump =:= all ->
+                    io:format(user, "New po trace ~p~n", [POM]),
+                    dump_trace(State, Tab, SimpMap);
+                _ ->
+                    ok
+            end,
+            ets:update_counter(AccTab, po_coverage_counter, 1);
+        false ->
+            case Dump of
+                all ->
+                    io:format(user, "po trace ~p~n", [POM]),
+                    dump_trace(State, Tab, SimpMap);
+                _ ->
+                    ok
+            end,
+            case ets:lookup(AccTab, {po_trace, POM}) of
+                [{_, ItList}] ->
+                    ets:update_element(AccTab, {po_trace, POM}, [{2, [IC | ItList]}])
+            end
     end,
     ok.
+
+find_racing_locations(_, Tab, Races) ->
+    TIDs =
+        lists:foldl(
+          fun ({X, YList}, OuterAcc) ->
+                  lists:foldl(
+                    fun (Y, Acc) ->
+                            sets:add_element(Y, Acc)
+                    end,
+                    sets:add_element(X, OuterAcc),
+                    YList)
+          end, sets:new(), Races),
+    Locations =
+        ets:foldl(
+          fun (?TraceSend(TID, Where, _, _, _, _, _), Acc) ->
+                  case sets:is_element(TID, TIDs) of
+                      true ->
+                          sets:add_element(Where, Acc);
+                      false ->
+                          Acc
+                  end;
+
+              (_, Acc) ->
+                  Acc
+          end, sets:new(), Tab),
+    sets:to_list(Locations).
 
 %% ==== Path Coverage ====
 
@@ -360,24 +412,32 @@ merge_state_coverage(Tab, IterationId, AccTab, SimpMap) ->
 
 %% ==== Trace Dump ====
 
-dump_trace(_State, Tab, SimpMap) ->
-    TraceRev = 
-        ets:foldl(
-          fun (?TraceSend(_, _Where, FromX, ToX, _Type, ContentX, _Effect), Acc) ->
-                  From = simplify(FromX, SimpMap),
-                  To = simplify(ToX, SimpMap),
-                  Content = simplify(ContentX, SimpMap),
-                  [ {send, From, To, Content} | Acc ];
-              (?TraceRecv(_, _Where, ToX, _Type, ContentX), Acc) ->
-                  To = simplify(ToX, SimpMap),
-                  Content = simplify(ContentX, SimpMap),
-                  [ {recv, To, Content} | Acc];
-              (_, Acc) ->
-                  Acc
-          end, [], Tab),
-    io:format(user,
-              "Trace: ~p~n",
-              [lists:reverse(TraceRev)]),
+dump_trace(#state{dump_traces_verbose = Verbose} = _State, Tab, SimpMap) ->
+    case Verbose of
+        false ->
+            TraceRev =
+                ets:foldl(
+                  fun (?TraceSend(_, _Where, FromX, ToX, _Type, ContentX, _Effect), Acc) ->
+                          From = simplify(FromX, SimpMap),
+                          To = simplify(ToX, SimpMap),
+                          Content = simplify(ContentX, SimpMap),
+                          [ {send, From, To, Content} | Acc ];
+                      (?TraceRecv(_, _Where, ToX, _Type, ContentX), Acc) ->
+                          To = simplify(ToX, SimpMap),
+                          Content = simplify(ContentX, SimpMap),
+                          [ {recv, To, Content} | Acc];
+                      (_, Acc) ->
+                          Acc
+                  end, [], Tab),
+            io:format(user,
+                      "Trace: ~p~n",
+                      [lists:reverse(TraceRev)]);
+
+        true ->
+            io:format(user,
+                      "Verbose trace: ~p~n",
+                      [ets:match(Tab, '$1')])
+    end,
     ok.
 
 %% ========
@@ -428,7 +488,7 @@ simplify(Data, _SimpMap) ->
 
 %% For a accumulated table, calculate the path tree fanout function
 %%   f(d) := how many path node are at the depth d
-%% Returns {MaxDepth, f}, where f has key from [0, MaxDepth] 
+%% Returns {MaxDepth, f}, where f has key from [0, MaxDepth]
 calc_acc_fanout(AccTab) ->
     [{root, Root}] = ets:lookup(AccTab, root),
     ChildrenMap =
@@ -467,7 +527,9 @@ init(Args) ->
     AccFilename = proplists:get_value(acc_filename, Args, undefined),
     AccForkPeriod = proplists:get_value(acc_fork_period, Args, 0),
     DumpTraces = proplists:get_value(dump_traces, Args, false),
+    DumpTracesVerbose = proplists:get_value(dump_traces_verbose, Args, false),
     DumpPOTraces = proplists:get_value(dump_po_traces, Args, false),
+    FindRaces = proplists:get_value(find_races, Args, false),
     POCoverage = proplists:get_value(po_coverage, Args, false),
     PathCoverage = proplists:get_value(path_coverage, Args, false),
     LineCoverage = proplists:get_value(line_coverage, Args, false),
@@ -476,7 +538,9 @@ init(Args) ->
                   , acc_filename = AccFilename
                   , acc_fork_period = AccForkPeriod
                   , dump_traces = DumpTraces
+                  , dump_traces_verbose = DumpTracesVerbose
                   , dump_po_traces = DumpPOTraces
+                  , find_races = FindRaces
                   , po_coverage = POCoverage
                   , path_coverage = PathCoverage
                   , line_coverage = LineCoverage
@@ -484,12 +548,11 @@ init(Args) ->
                   },
     {ok, State}.
 
-handle_call({stop, SeedInfo, SHT},
+handle_call({finalize, SeedInfo, SHT},
             _From,
             #state{ tab = Tab
                   , acc_filename = AF
                   , acc_fork_period = AFP
-                  , dump_traces = Dump
                   , po_coverage = POC
                   , path_coverage = PC
                   , line_coverage = LC
@@ -497,19 +560,15 @@ handle_call({stop, SeedInfo, SHT},
                   }
             = State)
   when Tab =/= undefined, AF =/= undefined ->
-    SimpMap = extract_simplify_map(SHT),
     AccTab = open_or_create_acc_ets_tab(AF),
     IC = ets:update_counter(AccTab, iteration_counter, 1),
     ets:insert(AccTab, {{iteration_seed, IC}, SeedInfo}),
-    case Dump of
-        true ->
-            dump_trace(State, Tab, SimpMap);
-        false ->
-            ok
-    end,
+    R0 = #{simp_map => extract_simplify_map(SHT)},
+    R1 = maybe_extract_partial_order_info(State, Tab, R0),
+    maybe_dump_trace(State, Tab, R1),
     case POC of
         true ->
-            merge_po_coverage(State, Tab, IC, AccTab, SimpMap),
+            merge_po_coverage(State, Tab, IC, AccTab, R1),
             [{po_coverage_counter, POCoverageCount}] = ets:lookup(AccTab, po_coverage_counter),
             io:format(user, "po coverage count = ~p~n", [POCoverageCount]);
         false ->
@@ -517,7 +576,7 @@ handle_call({stop, SeedInfo, SHT},
     end,
     case PC of
         true ->
-            merge_path_coverage(Tab, AccTab, SimpMap),
+            merge_path_coverage(Tab, AccTab, R1),
             [{path_coverage_counter, PathCoverageCount}] = ets:lookup(AccTab, path_coverage_counter),
             io:format(user, "path coverage count = ~p~n", [PathCoverageCount]);
         false ->
@@ -533,7 +592,7 @@ handle_call({stop, SeedInfo, SHT},
     end,
     case SC of
         true ->
-            merge_state_coverage(Tab, IC, AccTab, SimpMap),
+            merge_state_coverage(Tab, IC, AccTab, R1),
             [{state_coverage_counter, StateCoverageCount}] = ets:lookup(AccTab, state_coverage_counter),
             io:format(user, "state coverage count = ~p~n", [StateCoverageCount]);
         false ->
@@ -548,9 +607,37 @@ handle_call({stop, SeedInfo, SHT},
             ok
     end,
     os:cmd(lists:flatten(io_lib:format("mv ~s ~s", [AF ++ ".tmp", AF]))),
-    {reply, ok, State};
+    {reply, R1, State};
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.
+
+maybe_dump_trace(#state{dump_traces = true} = State, Tab, #{simp_map := SimpMap}) ->
+    dump_trace(State, Tab, SimpMap);
+maybe_dump_trace(_, _, _) ->
+    ok.
+
+maybe_extract_partial_order_info(#state{find_races = FindRaces, po_coverage = POC} = State, Tab, #{simp_map := SimpMap} = FinalData) ->
+    case FindRaces or POC of
+        true ->
+            case (catch analyze_partial_order(State, Tab, SimpMap)) of
+                {ok, {OrderMap, Races}} ->
+                    case FindRaces of
+                        true ->
+                            FinalData#{partial_order_map => OrderMap, races => find_racing_locations(State, Tab, Races)};
+                        false ->
+                            FinalData#{partial_order_map => OrderMap}
+                    end;
+                Other ->
+                    io:format(user,
+                              "Unexpected result from analyze_partail_order:~n"
+                              "  ~p~n",
+                              [Other]),
+                    FinalData
+            end;
+        false ->
+            FinalData
+    end.
+
 
 handle_cast({call, From, Where, Req}, #state{tab = Tab} = State) when Tab =/= undefined ->
     TC = ets:update_counter(Tab, trace_counter, 1),

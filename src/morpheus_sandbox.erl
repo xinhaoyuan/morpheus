@@ -2047,7 +2047,7 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT, proc_shtable = SHT} = S
     case TP of
         undefined -> ok;
         _ ->
-            ?T:stop(TP, FdSeedInfo, SHT)
+            ?T:finalize(TP, FdSeedInfo, SHT)
     end,
     exit(Reason).
 
