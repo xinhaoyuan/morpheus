@@ -108,7 +108,7 @@ merge_vc(VC1, VC2) ->
               Acc#{K => max(V, maps:get(K, VC2, 0))}
       end, VC2, VC1).
 
-analyze_partial_order(_State, Tab, SimpMap) ->
+analyze_partial_order(#state{find_races = FindRaces} = _State, Tab, SimpMap) ->
     %% Reconstruct the trace according to vector clocks.
     %% And detect racing operations.
     %% Traces with the same reconstructed vector clocks are po-equivalent.
@@ -163,17 +163,22 @@ analyze_partial_order(_State, Tab, SimpMap) ->
                           VC1 = merge_vc(IVC, VC),
                           VC2 = VC1#{From => Step + 1},
                           RacingOps =
-                              lists:foldl(
-                                fun ({SenderProc, SenderIdx, SenderTID}, Acc) ->
-                                        %% Check if the current send can happens before each message in the queue
-                                        HappensAfter = maps:get(SenderProc, VC, 0),
-                                        case SenderIdx >= HappensAfter of
-                                            true ->
-                                                [SenderTID | Acc];
-                                            false ->
-                                                Acc
-                                        end
-                                end, [], MH),
+                              case FindRaces of
+                                  true ->
+                                      lists:foldl(
+                                        fun ({SenderProc, SenderIdx, SenderTID}, Acc) ->
+                                                %% Check if the current send can happens before each message in the queue
+                                                HappensAfter = maps:get(SenderProc, VC, 0),
+                                                case SenderIdx >= HappensAfter of
+                                                    true ->
+                                                        [SenderTID | Acc];
+                                                    false ->
+                                                        Acc
+                                                end
+                                        end, [], MH);
+                                  false ->
+                                      []
+                              end,
                           Q = queue:in(VC2, maps:get(Content, MQ, queue:new())),
                           ProcState#{ local_vc_map := LVC#{From := VC2}
                                     , inbox_vc_map := IBM#{To := VC2}
@@ -217,7 +222,6 @@ analyze_partial_order(_State, Tab, SimpMap) ->
           fun (Proc, OPList, Acc) ->
                   Acc#{Proc => lists:reverse(OPList)}
           end, #{}, POMReversed),
-    io:format(user, "Races: ~p~n", [Races]),
     {ok, {POM, Races}}.
 
 merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, #{partial_order_map := POM, simp_map := SimpMap}) ->
@@ -384,7 +388,7 @@ merge_line_coverage(Tab, AccTab) ->
 
 %% ==== State Coverage ====
 
-merge_state_coverage(Tab, IterationId, AccTab, SimpMap) ->
+merge_state_coverage(Tab, IterationId, AccTab, #{simp_map := SimpMap}) ->
     ets:foldl(
       fun (?TraceReportState(_, Depth, RState), Acc) ->
               SimpState = simplify(RState, SimpMap),
