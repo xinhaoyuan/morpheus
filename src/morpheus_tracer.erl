@@ -24,17 +24,18 @@
         , terminate/2
         , code_change/3]).
 
--record(state, { tab             :: ets:tid()
-               , acc_filename    :: string()
-               , acc_fork_period :: integer()
-               , dump_traces     :: boolean()
-               , dump_traces_verbose :: boolean()
-               , dump_po_traces  :: new | all | false
-               , find_races      :: boolean()
-               , po_coverage     :: boolean()
-               , path_coverage   :: boolean()
-               , line_coverage   :: boolean()
-               , state_coverage  :: boolean()
+-record(state, { tab                     :: ets:tid()
+               , acc_filename            :: string()
+               , acc_fork_period         :: integer()
+               , dump_traces             :: boolean()
+               , dump_traces_verbose     :: boolean()
+               , dump_po_traces          :: new | all | false
+               , find_races              :: boolean()
+               , simplify_po_trace       :: boolean()
+               , po_coverage             :: boolean()
+               , path_coverage           :: boolean()
+               , line_coverage           :: boolean()
+               , state_coverage          :: boolean()
                }).
 
 -include("morpheus_trace.hrl").
@@ -108,7 +109,7 @@ merge_vc(VC1, VC2) ->
               Acc#{K => max(V, maps:get(K, VC2, 0))}
       end, VC2, VC1).
 
-analyze_partial_order(#state{find_races = FindRaces} = _State, Tab, SimpMap) ->
+analyze_partial_order(#state{find_races = FindRaces, simplify_po_trace = SimplifyPOTrace} = _State, Tab, SimpMap) ->
     %% Reconstruct the trace according to vector clocks.
     %% And detect racing operations.
     %% Traces with the same reconstructed vector clocks are po-equivalent.
@@ -118,7 +119,7 @@ analyze_partial_order(#state{find_races = FindRaces} = _State, Tab, SimpMap) ->
     %% To rebuild recv-send dependency, we need to rebuild the message history for each process.
     %%
     %% XXX I am not sure how to deal with ETS yet. Probably I would treat each ETS table as a process.
-    #{proc_operation_map := POMReversed, races := Races} =
+    #{proc_operation_map := POMReversed, races := Races, aux_serialization := AuxSerialization} =
         ets:foldl(
           fun (?TraceNewProcess(_, ProcX, _AbsId, CreatorX, _EntryInfo),
                #{local_vc_map := LVC, inbox_vc_map := IBM, message_queue_map := MQM, message_history_map := MHM, proc_operation_map := POM} = ProcState) ->
@@ -149,7 +150,13 @@ analyze_partial_order(#state{find_races = FindRaces} = _State, Tab, SimpMap) ->
                             };
 
               (?TraceSend(TID, _Where, FromX, ToX, _Type, Content, _Effect),
-               #{local_vc_map := LVC, inbox_vc_map := IBM, message_queue_map := MQM, message_history_map := MHM, proc_operation_map := POM, races := Races} = ProcState) ->
+               #{ local_vc_map := LVC
+                , inbox_vc_map := IBM
+                , message_queue_map := MQM
+                , message_history_map := MHM
+                , aux_serialization := AuxSerialization
+                , proc_operation_map := POM
+                , races := Races} = ProcState) ->
                   %% Sending message to a process will make it happen after all sending of existing messages, which is in inbox_vc_map
                   case is_pid(FromX) of
                       true ->
@@ -184,7 +191,8 @@ analyze_partial_order(#state{find_races = FindRaces} = _State, Tab, SimpMap) ->
                                     , inbox_vc_map := IBM#{To := VC2}
                                     , message_queue_map := MQM#{To := MQ#{Content => Q}}
                                     , message_history_map := MHM#{To := [{From, Step, TID} | MH]}
-                                    , proc_operation_map := POM#{From => [{VC1, To} | PO]}
+                                    , aux_serialization := [From | AuxSerialization]
+                                    , proc_operation_map := POM#{From => [{VC1, {To, Content}} | PO]}
                                     , races :=
                                           case RacingOps of
                                               [] ->
@@ -213,6 +221,7 @@ analyze_partial_order(#state{find_races = FindRaces} = _State, Tab, SimpMap) ->
            , inbox_vc_map => #{}
            , message_queue_map => #{}
            , message_history_map => #{}
+           , aux_serialization => []
            , proc_operation_map => #{}
            , races => []
            },
@@ -220,17 +229,70 @@ analyze_partial_order(#state{find_races = FindRaces} = _State, Tab, SimpMap) ->
     POM =
         maps:fold(
           fun (Proc, OPList, Acc) ->
-                  Acc#{Proc => lists:reverse(OPList)}
+                  Acc#{Proc => lists:foldl(
+                                 fun ({VC, _Info}, InnerAcc) ->
+                                         [VC | InnerAcc]
+                                 end, [], OPList)}
           end, #{}, POMReversed),
-    {ok, {POM, Races}}.
+    Ret0 = #{partial_order_map => POM},
+    Ret1 =
+        case FindRaces of
+            false ->
+                Ret0;
+            true ->
+                Ret0#{races => Races}
+        end,
+    Ret2 =
+        case SimplifyPOTrace of
+            true ->
+                POTrace =
+                    maps:fold(
+                      fun (Proc, OPList, Acc) ->
+                              Acc#{Proc => lists:foldl(
+                                             fun ({VC, {To, Content}}, InnerAcc) ->
+                                                     [{VC, {To, simplify(Content, SimpMap)}} | InnerAcc]
+                                             end, [], OPList)}
+                      end, #{}, POMReversed),
+                Ret1#{simplified_po_trace => simplify_po_trace(POTrace, lists:reverse(AuxSerialization))};
+            false ->
+                Ret1
+        end,
+    {ok, Ret2}.
 
-merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, #{partial_order_map := POM, simp_map := SimpMap}) ->
+simplify_po_trace(POTrace, AuxSerialization) ->
+    {_, InitialInfo} =
+        lists:foldl(
+          fun (Actor, {Index, Acc}) ->
+                  {Index + 1, Acc#{Actor => {Index, 1}}}
+          end, {0, #{}}, lists:usort(AuxSerialization)),
+
+    simplify_po_trace(InitialInfo, POTrace, AuxSerialization, []).
+
+simplify_po_trace(_, _, [], Rev) ->
+    lists:reverse(Rev);
+simplify_po_trace(Info, POTrace, [From | RestSerialization] = AuxSerialization, Rev) ->
+    #{From := {FromI, Counter}} = Info,
+    #{From := [{VC, {To, Content}} | Rest]} = POTrace,
+    #{To := {ToI, _}} = Info,
+    Height = maps:fold(
+               fun (Actor, Index, AccHeight) ->
+                       #{Actor := {ActorI, _}} = Info,
+                       CurHeight = maps:get({ActorI, Index}, Info),
+                       max(CurHeight, AccHeight)
+               end, 0, VC) + 1,
+    simplify_po_trace(Info#{{FromI, Counter} => Height, From := {FromI, Counter + 1}},
+                       POTrace#{From := Rest},
+                       RestSerialization,
+                       [{FromI, Height, ToI, Content} | Rev]).
+
+
+merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, #{partial_order_map := POM, simp_map := SimpMap} = FinalData) ->
     %% Thus we can count how many partial orders has been covered.
     case ets:insert_new(AccTab, {{po_trace, POM}, [IC]}) of
         true ->
             case Dump of
                 _ when Dump =:= new; Dump =:= all ->
-                    io:format(user, "New po trace ~p~n", [POM]),
+                    io:format(user, "New po trace ~p~n", [maps:get(simplified_po_trace, FinalData, POM)]),
                     dump_trace(State, Tab, SimpMap);
                 _ ->
                     ok
@@ -534,6 +596,7 @@ init(Args) ->
     DumpTracesVerbose = proplists:get_value(dump_traces_verbose, Args, false),
     DumpPOTraces = proplists:get_value(dump_po_traces, Args, false),
     FindRaces = proplists:get_value(find_races, Args, false),
+    SimplifyPOTrace = proplists:get_value(simplify_po_trace, Args, false),
     POCoverage = proplists:get_value(po_coverage, Args, false),
     PathCoverage = proplists:get_value(path_coverage, Args, false),
     LineCoverage = proplists:get_value(line_coverage, Args, false),
@@ -545,6 +608,7 @@ init(Args) ->
                   , dump_traces_verbose = DumpTracesVerbose
                   , dump_po_traces = DumpPOTraces
                   , find_races = FindRaces
+                  , simplify_po_trace = SimplifyPOTrace
                   , po_coverage = POCoverage
                   , path_coverage = PathCoverage
                   , line_coverage = LineCoverage
@@ -620,17 +684,12 @@ maybe_dump_trace(#state{dump_traces = true} = State, Tab, #{simp_map := SimpMap}
 maybe_dump_trace(_, _, _) ->
     ok.
 
-maybe_extract_partial_order_info(#state{find_races = FindRaces, po_coverage = POC} = State, Tab, #{simp_map := SimpMap} = FinalData) ->
-    case FindRaces or POC of
+maybe_extract_partial_order_info(#state{find_races = FindRaces, po_coverage = POC, simplify_po_trace = SimplifyPOTrace} = State, Tab, #{simp_map := SimpMap} = FinalData) ->
+    case FindRaces or POC or SimplifyPOTrace of
         true ->
             case (catch analyze_partial_order(State, Tab, SimpMap)) of
-                {ok, {OrderMap, Races}} ->
-                    case FindRaces of
-                        true ->
-                            FinalData#{partial_order_map => OrderMap, races => find_racing_locations(State, Tab, Races)};
-                        false ->
-                            FinalData#{partial_order_map => OrderMap}
-                    end;
+                {ok, R} ->
+                    maps:merge(R, FinalData);
                 Other ->
                     io:format(user,
                               "Unexpected result from analyze_partail_order:~n"
