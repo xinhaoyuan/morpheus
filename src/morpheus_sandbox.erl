@@ -1653,7 +1653,7 @@ ctl_handle_call(#sandbox_state{opt = #sandbox_opt{fd_scheduler = FdSched, diffis
                 false -> ok;
                 AdvStr ->
                     Term = ?H:string_to_term(AdvStr),
-                    FdSched ! {hint, {set_guidance, Term}}
+                    fd_scheduler:call(FdSched, {set_guidance, Term})
             end;
         _ ->
             {ok, LSock} = gen_tcp:listen(0, [binary, {active, false}]),
@@ -1667,8 +1667,7 @@ ctl_handle_call(#sandbox_state{opt = #sandbox_opt{fd_scheduler = FdSched, diffis
             gen_tcp:close(RSock),
             gen_tcp:close(LSock),
             Resp = binary_to_term(BinResp),
-            %% No need to synchronize since the message ordering is guaranteed
-            FdSched ! {hint, {set_guidance, Resp}}
+            fd_scheduler:call(FdSched, {set_guidance, Resp})
     end,
     {S, ok};
 ctl_handle_call(#sandbox_state{
@@ -2025,18 +2024,18 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT, proc_shtable = SHT} = S
     ets:delete(PT),
     ?INFO("ctl stop transient = ~p, lives = ~p, deads = ~p", [S#sandbox_state.transient_counter, Lives, Deads]),
     #sandbox_state{opt = #sandbox_opt{fd_opts = FdOpts, fd_scheduler = FdSched, diffiso_port = DiffisoPort, tracer_pid = TP}} = S,
-    FdSeedInfo =
+    FdTraceInfo =
         case FdOpts of
             undefined ->
                 undefined;
             _ ->
-                fd_get_seed_info(FdSched)
+                fd_get_trace_info(FdSched)
         end,
     case DiffisoPort of
         undefined ->
             ok;
         _ ->
-            diffiso_report(DiffisoPort, {FdSeedInfo, Reason})
+            diffiso_report(DiffisoPort, {FdTraceInfo, Reason})
     end,
     case FdOpts of
         undefined ->
@@ -2047,17 +2046,12 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT, proc_shtable = SHT} = S
     case TP of
         undefined -> ok;
         _ ->
-            ?T:finalize(TP, FdSeedInfo, SHT)
+            ?T:finalize(TP, FdTraceInfo, SHT)
     end,
     exit(Reason).
 
-fd_get_seed_info(FdSched) ->
-    Ref = make_ref(),
-    FdSched ! {hint, {get_seed_info, Ref, self()}},
-    receive
-        {Ref, Reply} ->
-            Reply
-    end.
+fd_get_trace_info(FdSched) ->
+    fd_scheduler:call(FdSched, {get_trace_info}).
 
 diffiso_report(Port, Data) ->
     BinData = term_to_binary({report, Data}),

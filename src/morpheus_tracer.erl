@@ -240,7 +240,7 @@ analyze_partial_order(#state{find_races = FindRaces, simplify_po_trace = Simplif
             false ->
                 Ret0;
             true ->
-                Ret0#{races => Races}
+                Ret0#{races => find_racing_locations(_State, Tab, Races)}
         end,
     Ret2 =
         case SimplifyPOTrace of
@@ -270,7 +270,7 @@ simplify_po_trace(POTrace, AuxSerialization) ->
 
 simplify_po_trace(_, _, [], Rev) ->
     lists:reverse(Rev);
-simplify_po_trace(Info, POTrace, [From | RestSerialization] = AuxSerialization, Rev) ->
+simplify_po_trace(Info, POTrace, [From | RestSerialization] = _AuxSerialization, Rev) ->
     #{From := {FromI, Counter}} = Info,
     #{From := [{VC, {To, Content}} | Rest]} = POTrace,
     #{To := {ToI, _}} = Info,
@@ -314,16 +314,18 @@ merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, #{part
     ok.
 
 find_racing_locations(_, Tab, Races) ->
-    TIDs =
+    {NRaces, TIDs} =
         lists:foldl(
-          fun ({X, YList}, OuterAcc) ->
-                  lists:foldl(
-                    fun (Y, Acc) ->
-                            sets:add_element(Y, Acc)
-                    end,
-                    sets:add_element(X, OuterAcc),
-                    YList)
-          end, sets:new(), Races),
+          fun ({X, YList}, {N, S}) ->
+                  {N + length(YList),
+                   lists:foldl(
+                     fun (Y, Acc) ->
+                             sets:add_element(Y, Acc)
+                     end,
+                     sets:add_element(X, S),
+                     YList)}
+          end, {0, sets:new()}, Races),
+    io:format(user, "# of races = ~p~n", [NRaces]),
     Locations =
         ets:foldl(
           fun (?TraceSend(TID, Where, _, _, _, _, _), Acc) ->
