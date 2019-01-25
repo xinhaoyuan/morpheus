@@ -1671,13 +1671,23 @@ ctl_handle_call(#sandbox_state{opt = #sandbox_opt{fd_scheduler = FdSched, diffis
     end,
     {S, ok};
 ctl_handle_call(#sandbox_state{
-                   opt = #sandbox_opt{tracer_pid = TP},
-                   scheduler_push_counter = SPC
+                   opt = #sandbox_opt{
+                            fd_scheduler = FdSched,
+                            tracer_pid = TP
+                           },
+                   scheduler_push_counter = _SPC
                   } = S, _Where, ?cci_guest_report_state(State)) ->
     case TP of
         undefined -> ok;
         _ ->
-            ?T:trace_report_state(TP, SPC, State)
+            TraceInfo =
+                case FdSched of
+                    undefined ->
+                        undefined;
+                    _ ->
+                        fd_scheduler:call(FdSched, {get_trace_info})
+                end,
+            ?T:trace_report_state(TP, TraceInfo, State)
     end,
     {S, ok};
 ctl_handle_call(S, Where, R) ->

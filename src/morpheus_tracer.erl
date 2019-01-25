@@ -60,11 +60,11 @@ trace_send(T, Where, From, To, Type, Content, Effect) ->
 trace_receive(T, Where, To, Type, Content) ->
     gen_server:cast(T, {recv, Where, To, Type, Content}).
 
-trace_report_state(T, Depth, State) ->
-    gen_server:cast(T, {report_state, Depth, State}).
+trace_report_state(T, TraceInfo, State) ->
+    gen_server:cast(T, {report_state, TraceInfo, State}).
 
-finalize(T, SeedInfo, SHT) ->
-    gen_server:call(T, {finalize, SeedInfo, SHT}, infinity).
+finalize(T, TraceInfo, SHT) ->
+    gen_server:call(T, {finalize, TraceInfo, SHT}, infinity).
 
 create_ets_tab() ->
     Tab = ets:new(trace_tab, [ordered_set, public, {write_concurrency, true}]),
@@ -618,7 +618,7 @@ init(Args) ->
                   },
     {ok, State}.
 
-handle_call({finalize, SeedInfo, SHT},
+handle_call({finalize, TraceInfo, SHT},
             _From,
             #state{ tab = Tab
                   , acc_filename = AF
@@ -632,7 +632,7 @@ handle_call({finalize, SeedInfo, SHT},
   when Tab =/= undefined, AF =/= undefined ->
     AccTab = open_or_create_acc_ets_tab(AF),
     IC = ets:update_counter(AccTab, iteration_counter, 1),
-    ets:insert(AccTab, {{iteration_seed, IC}, SeedInfo}),
+    ets:insert(AccTab, {{iteration_info, IC}, TraceInfo}),
     R0 = #{simp_map => extract_simplify_map(SHT)},
     R1 = maybe_extract_partial_order_info(State, Tab, R0),
     maybe_dump_trace(State, Tab, R1),
@@ -720,9 +720,9 @@ handle_cast({recv, Where, To, Type, Content}, #state{tab = Tab} = State) when Ta
     TC = ets:update_counter(Tab, trace_counter, 1),
     ets:insert(Tab, ?TraceRecv(TC, Where, To, Type, Content)),
     {noreply, State};
-handle_cast({report_state, Depth, RState}, #state{tab = Tab} = State) when Tab =/= undefined ->
+handle_cast({report_state, TraceInfo, RState}, #state{tab = Tab} = State) when Tab =/= undefined ->
     TC = ets:update_counter(Tab, trace_counter, 1),
-    ets:insert(Tab, ?TraceReportState(TC, Depth, RState)),
+    ets:insert(Tab, ?TraceReportState(TC, TraceInfo, RState)),
     {noreply, State};
 handle_cast(Msg, State) ->
     io:format(user, "Unknown trace cast ~p~n", [Msg]),

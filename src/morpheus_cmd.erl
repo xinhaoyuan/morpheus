@@ -16,7 +16,10 @@ main(["show-iterations", AccFilename]) ->
     {ok, AccTab} = ets:file2tab(AccFilename, [{verify,true}]),
     IterationList =
         ets:foldl(
-          fun ({{iteration_seed, It}, Info}, Acc) ->
+          fun ({{iteration_info, It}, Info}, Acc) ->
+                  [{It, Info} | Acc];
+              %% Compatibility ...
+              ({{iteration_seed, It}, Info}, Acc) ->
                   [{It, Info} | Acc];
               (_, Acc) ->
                   Acc
