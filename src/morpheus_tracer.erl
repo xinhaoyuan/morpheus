@@ -39,6 +39,7 @@
                , line_coverage           :: boolean()
                , state_coverage          :: boolean()
                , extra_handlers          :: [module()]
+               , verbose_finalize        :: boolean()
                }).
 
 -include("morpheus_trace.hrl").
@@ -599,6 +600,7 @@ init(Args) ->
     LineCoverage = proplists:get_value(line_coverage, Args, false),
     StateCoverage = proplists:get_value(state_coverage, Args, false),
     ExtraHandlers = proplists:get_value(extra_handlers, Args, []),
+    VerboseFinalize = proplists:get_value(verbose_finalize, Args, false),
     State = #state{ tab = Tab
                   , acc_filename = AccFilename
                   , acc_fork_period = AccForkPeriod
@@ -612,6 +614,7 @@ init(Args) ->
                   , line_coverage = LineCoverage
                   , state_coverage = StateCoverage
                   , extra_handlers = ExtraHandlers
+                  , verbose_finalize = VerboseFinalize
                   },
     {ok, State}.
 
@@ -625,6 +628,7 @@ handle_call({finalize, TraceInfo, SHT},
                   , line_coverage = LC
                   , state_coverage = SC
                   , extra_handlers = ExtraHandlers
+                  , verbose_finalize = VerboseFinalize
                   }
             = State)
   when Tab =/= undefined, AF =/= undefined ->
@@ -679,6 +683,12 @@ handle_call({finalize, TraceInfo, SHT},
                fun ({HandlerMod, HandlerState}, AccR) ->
                        HandlerMod:handle_trace(HandlerState, Tab, AccR)
                end, R1, ExtraHandlers),
+    case VerboseFinalize of
+        true ->
+            io:format(user, "Tracer finalize => ~p~n", [RFinal]);
+        false ->
+            ok
+    end,
     {reply, RFinal, State};
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.

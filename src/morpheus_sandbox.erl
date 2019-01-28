@@ -2056,8 +2056,7 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT, proc_shtable = SHT} = S
     case TP of
         undefined -> ok;
         _ ->
-            TracerRet = ?T:finalize(TP, FdTraceInfo, SHT),
-            ?INFO("Tracer finalize => ~p", [TracerRet])
+            ?T:finalize(TP, FdTraceInfo, SHT)
     end,
     exit(Reason).
 
@@ -3170,6 +3169,7 @@ real_tid(TRef) ->
 handle_ets(F, A, {_Old, _New, Ann}) ->
     case F of
         all ->
+            %% call_ctl(get_ctl(), Ann, {global_op, [{ets_all, get_node()}], []}), 
             {ok, Ret} = ?cc_ets_all(get_ctl(), Ann),
             lists:map(fun (Name) ->
                         if
