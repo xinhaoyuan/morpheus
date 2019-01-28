@@ -4,6 +4,7 @@
         , while/2
         , replace_pid/2
         , string_to_term/1
+        , open_or_create_ets/2
         ]).
 
 take_nth(N, List) ->
@@ -51,3 +52,11 @@ replace_pid_tuple(0, Tp, _) ->
     Tp;
 replace_pid_tuple(Pos, Tp, F) ->
     replace_pid_tuple(Pos - 1, setelement(Pos, Tp, replace_pid(element(Pos, Tp), F)), F).
+
+open_or_create_ets(Filename, CreateFun) ->
+    case ets:file2tab(Filename, [{verify, true}]) of
+        {ok, ETS} ->
+            ETS;
+        {error, Reason} ->
+            CreateFun(Reason)
+    end.

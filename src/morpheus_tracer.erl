@@ -16,6 +16,8 @@
         , calc_acc_fanout/1
         ]).
 
+-export([ simplify/2 ]).
+
 %% gen_server.
 -export([ init/1
         , handle_call/3
@@ -36,6 +38,7 @@
                , path_coverage           :: boolean()
                , line_coverage           :: boolean()
                , state_coverage          :: boolean()
+               , extra_handlers          :: [module()]
                }).
 
 -include("morpheus_trace.hrl").
@@ -71,14 +74,6 @@ create_ets_tab() ->
     ets:insert(Tab, {trace_counter, 0}),
     Tab.
 
-open_or_create_ets(Filename, CreateFun) ->
-    case ets:file2tab(Filename, [{verify, true}]) of
-        {ok, ETS} ->
-            ETS;
-        {error, Reason} ->
-            CreateFun(Reason)
-    end.
-
 create_acc_ets_tab() ->
     Tab = ets:new(acc_tab, []),
     ets:insert(Tab, {iteration_counter, 0}),
@@ -91,7 +86,7 @@ create_acc_ets_tab() ->
     Tab.
 
 open_or_create_acc_ets_tab(Filename) ->
-    open_or_create_ets(
+    morpheus_helper:open_or_create_ets(
       Filename,
       fun (_Reason) ->
               create_acc_ets_tab()
@@ -240,7 +235,8 @@ analyze_partial_order(#state{find_races = FindRaces, simplify_po_trace = Simplif
             false ->
                 Ret0;
             true ->
-                Ret0#{races => find_racing_locations(_State, Tab, Races)}
+                {RaceCount, RacingLocations} = refine_race_information(_State, Tab, Races),
+                Ret0#{racing_locations => RacingLocations, race_count => RaceCount}
         end,
     Ret2 =
         case SimplifyPOTrace of
@@ -313,7 +309,7 @@ merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, #{part
     end,
     ok.
 
-find_racing_locations(_, Tab, Races) ->
+refine_race_information(_, Tab, Races) ->
     {NRaces, TIDs} =
         lists:foldl(
           fun ({X, YList}, {N, S}) ->
@@ -325,7 +321,6 @@ find_racing_locations(_, Tab, Races) ->
                      sets:add_element(X, S),
                      YList)}
           end, {0, sets:new()}, Races),
-    io:format(user, "# of races = ~p~n", [NRaces]),
     Locations =
         ets:foldl(
           fun (?TraceSend(TID, Where, _, _, _, _, _), Acc) ->
@@ -339,7 +334,7 @@ find_racing_locations(_, Tab, Races) ->
               (_, Acc) ->
                   Acc
           end, sets:new(), Tab),
-    sets:to_list(Locations).
+    {NRaces, sets:to_list(Locations)}.
 
 %% ==== Path Coverage ====
 
@@ -603,6 +598,7 @@ init(Args) ->
     PathCoverage = proplists:get_value(path_coverage, Args, false),
     LineCoverage = proplists:get_value(line_coverage, Args, false),
     StateCoverage = proplists:get_value(state_coverage, Args, false),
+    ExtraHandlers = proplists:get_value(extra_handlers, Args, []),
     State = #state{ tab = Tab
                   , acc_filename = AccFilename
                   , acc_fork_period = AccForkPeriod
@@ -615,6 +611,7 @@ init(Args) ->
                   , path_coverage = PathCoverage
                   , line_coverage = LineCoverage
                   , state_coverage = StateCoverage
+                  , extra_handlers = ExtraHandlers
                   },
     {ok, State}.
 
@@ -627,6 +624,7 @@ handle_call({finalize, TraceInfo, SHT},
                   , path_coverage = PC
                   , line_coverage = LC
                   , state_coverage = SC
+                  , extra_handlers = ExtraHandlers
                   }
             = State)
   when Tab =/= undefined, AF =/= undefined ->
@@ -677,7 +675,11 @@ handle_call({finalize, TraceInfo, SHT},
             ok
     end,
     os:cmd(lists:flatten(io_lib:format("mv ~s ~s", [AF ++ ".tmp", AF]))),
-    {reply, R1, State};
+    RFinal = lists:foldl(
+               fun ({HandlerMod, HandlerState}, AccR) ->
+                       HandlerMod:handle_trace(HandlerState, Tab, AccR)
+               end, R1, ExtraHandlers),
+    {reply, RFinal, State};
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.
 

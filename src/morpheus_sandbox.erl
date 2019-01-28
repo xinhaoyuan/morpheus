@@ -2056,7 +2056,8 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT, proc_shtable = SHT} = S
     case TP of
         undefined -> ok;
         _ ->
-            ?T:finalize(TP, FdTraceInfo, SHT)
+            TracerRet = ?T:finalize(TP, FdTraceInfo, SHT),
+            ?INFO("Tracer finalize => ~p", [TracerRet])
     end,
     exit(Reason).
 
