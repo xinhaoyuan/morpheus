@@ -39,7 +39,7 @@
                , line_coverage           :: boolean()
                , state_coverage          :: boolean()
                , extra_handlers          :: [module()]
-               , verbose_finalize        :: boolean()
+               , extra_opts             :: #{}
                }).
 
 -include("morpheus_trace.hrl").
@@ -236,8 +236,8 @@ analyze_partial_order(#state{find_races = FindRaces, simplify_po_trace = Simplif
             false ->
                 Ret0;
             true ->
-                {RaceCount, RacingLocations} = refine_race_information(_State, Tab, Races),
-                Ret0#{racing_locations => RacingLocations, race_count => RaceCount}
+                {RaceCount, RacingTIDs, RacingLocations} = refine_race_information(_State, Tab, Races),
+                Ret0#{racing_locations => RacingLocations, racing_tids => RacingTIDs, race_count => RaceCount}
         end,
     Ret2 =
         case SimplifyPOTrace of
@@ -335,83 +335,137 @@ refine_race_information(_, Tab, Races) ->
               (_, Acc) ->
                   Acc
           end, sets:new(), Tab),
-    {NRaces, sets:to_list(Locations)}.
+    {NRaces, TIDs, sets:to_list(Locations)}.
 
 %% ==== Path Coverage ====
 
+path_traverse(TraceEntry, #{simp_map := SimpMap} = AnalysesData, AccTab, PathState, #{allow_create_new_nodes := AllowCreate, debug := Debug}) ->
+    case TraceEntry of
+        ?TraceNewProcess(_, Proc, _AbsId, _Creator, EntryInfo) ->
+            [{root, Root}] = ets:lookup(AccTab, root),
+            Branch = {new, simplify(Proc, SimpMap), simplify(EntryInfo, SimpMap)},
+            case ets:lookup(AccTab, {Root, Branch}) of
+                [] when AllowCreate ->
+                    case Debug of
+                        true ->
+                            AvailableBranch = ets:match(AccTab, {{Root, '$1'}, '_'}),
+                            io:format(user,
+                                      "New branch ~p at ~p~n"
+                                      "  available: ~p~n",
+                                      [Branch, Root, AvailableBranch]);
+                        false ->
+                            ok
+                    end,
+                    NewNode = ets:update_counter(AccTab, node_counter, 1),
+                    ets:insert(AccTab, {{Root, Branch}, NewNode}),
+                    PathState#{Proc => {NewNode, true}};
+                [{_, Next}] ->
+                    PathState#{Proc => {Next, false}}
+            end;
+         ?TraceSend(TID, Where, From, To, Type, Content, _Effect) ->
+            case maps:is_key(From, PathState) of
+                true ->
+                    #{From := {StateNode, _}} = PathState,
+                    SimpContent = simplify(Content, SimpMap),
+                    Branch = {send, Where, simplify(To, SimpMap), Type, SimpContent},
+                    {NextState0, NextNode} =
+                        case ets:lookup(AccTab, {StateNode, Branch}) of
+                            [] when AllowCreate ->
+                                case Debug of
+                                    true ->
+                                        AvailableBranch = ets:match(AccTab, {{StateNode, '$1'}, '_'}),
+                                        io:format(user,
+                                                  "New branch ~p at ~p~n"
+                                                  "  available: ~p~n",
+                                                  [Branch, StateNode, AvailableBranch]);
+                                    false ->
+                                        ok
+                                end,
+                                NewNode = ets:update_counter(AccTab, node_counter, 1),
+                                ets:insert(AccTab, {{StateNode, Branch}, NewNode}),
+                                {PathState#{From := {NewNode, true}}, NewNode};
+                            [{_, Next}] ->
+                                {PathState#{From := {Next, false}}, Next}
+                        end,
+                    NextState = NextState0#{total_op => 1 + maps:get(total_op, NextState0, 0)},
+                    case maps:is_key(racing_tids, AnalysesData) andalso
+                        sets:is_element(TID, maps:get(racing_tids, AnalysesData)) of
+                        true ->
+                            case ets:insert_new(AccTab, {{racing_path_flag, NextNode}, 1}) of
+                                true ->
+                                    NextState#{ racing_op => 1 + maps:get(racing_op, PathState, 0)
+                                              , racing_fn => 1 + maps:get(racing_fn, PathState, 0)};
+                                false ->
+                                    ets:update_counter(AccTab, {racing_path_flag, NextNode}, 1),
+                                    NextState#{racing_op => 1 + maps:get(racing_op, PathState, 0)}
+                            end;
+                        false ->
+                            case ets:lookup(AccTab, {racing_path_flag, NextNode}) of
+                                [] ->
+                                    NextState;
+                                _ ->
+                                    NextState#{racing_fp => 1 + maps:get(racing_fp, PathState, 0)}
+                            end
+                    end;
+                false ->
+                    PathState
+            end;
+        ?TraceRecv(_, Where, To, Type, Content) ->
+            case maps:is_key(To, PathState) of
+                true when AllowCreate ->
+                    #{To := {StateNode, _}} = PathState,
+                    SimpContent = simplify(Content, SimpMap),
+                    Branch = {recv, Where, Type, SimpContent},
+                    case ets:lookup(AccTab, {StateNode, Branch}) of
+                        [] ->
+                            case Debug of
+                                true ->
+                                    AvailableBranch = ets:match(AccTab, {{StateNode, '$1'}, '_'}),
+                                    io:format(user,
+                                              "New branch ~p at ~p~n"
+                                              "  available: ~p~n",
+                                              [Branch, StateNode, AvailableBranch]);
+                                false ->
+                                    ok
+                            end,
+                            NewNode = ets:update_counter(AccTab, node_counter, 1),
+                            ets:insert(AccTab, {{StateNode, Branch}, NewNode}),
+                            PathState#{To := {NewNode, true}};
+                        [{_, Next}] ->
+                            PathState#{To := {Next, false}}
+                    end;
+                false ->
+                    PathState
+            end;
+        _ ->
+            PathState
+    end.
+
 %% Merge per-actor path.
-merge_path_coverage(Tab, AccTab, SimpMap) ->
-    ProcState =
+merge_path_coverage(#state{extra_opts = ExtraOpts}, Tab, AccTab, AnalysesData) ->
+    PathState =
         ets:foldl(
-          fun (?TraceNewProcess(_, Proc, _AbsId, _Creator, EntryInfo), ProcState) ->
-                  [{root, Root}] = ets:lookup(AccTab, root),
-                  Branch = {new, simplify(Proc, SimpMap), simplify(EntryInfo, SimpMap)},
-                  case ets:lookup(AccTab, {Root, Branch}) of
-                      [] ->
-                          AvailableBranch = ets:match(AccTab, {{Root, '$1'}, '_'}),
-                          io:format(user,
-                                    "New branch ~p at ~p~n"
-                                    "  available: ~p~n",
-                                    [Branch, Root, AvailableBranch]),
-                          NewNode = ets:update_counter(AccTab, node_counter, 1),
-                          ets:insert(AccTab, {{Root, Branch}, NewNode}),
-                          ProcState#{Proc => {NewNode, true}};
-                      [{_, Next}] ->
-                          ProcState#{Proc => {Next, false}}
-                  end;
-              (?TraceSend(_, Where, From, To, Type, Content, _Effect), ProcState) ->
-                  case maps:is_key(From, ProcState) of
-                      true ->
-                          #{From := {StateNode, _}} = ProcState,
-                          SimpContent = simplify(Content, SimpMap),
-                          Branch = {send, Where, simplify(To, SimpMap), Type, SimpContent},
-                          case ets:lookup(AccTab, {StateNode, Branch}) of
-                              [] ->
-                                  AvailableBranch = ets:match(AccTab, {{StateNode, '$1'}, '_'}),
-                                  io:format(user,
-                                            "New branch ~p at ~p~n"
-                                            "  available: ~p~n",
-                                            [Branch, StateNode, AvailableBranch]),
-                                  NewNode = ets:update_counter(AccTab, node_counter, 1),
-                                  ets:insert(AccTab, {{StateNode, Branch}, NewNode}),
-                                  ProcState#{From := {NewNode, true}};
-                              [{_, Next}] ->
-                                  ProcState#{From := {Next, false}}
-                          end;
-                      false ->
-                          ProcState
-                  end;
-              (?TraceRecv(_, Where, To, Type, Content), ProcState) ->
-                  case maps:is_key(To, ProcState) of
-                      true ->
-                          #{To := {StateNode, _}} = ProcState,
-                          SimpContent = simplify(Content, SimpMap),
-                          Branch = {recv, Where, Type, SimpContent},
-                          case ets:lookup(AccTab, {StateNode, Branch}) of
-                              [] ->
-                                  %% AvailableBranch = ets:match(AccTab, {{StateNode, '$1'}, '_'}),
-                                  %% io:format(user,
-                                  %%           "New branch ~p at ~p~n"
-                                  %%           "  available: ~p~n",
-                                  %%           [Branch, StateNode, AvailableBranch]),
-                                  NewNode = ets:update_counter(AccTab, node_counter, 1),
-                                  ets:insert(AccTab, {{StateNode, Branch}, NewNode}),
-                                  ProcState#{To := {NewNode, true}};
-                              [{_, Next}] ->
-                                  ProcState#{To := {Next, false}}
-                          end;
-                      false ->
-                          ProcState
-                  end;
-              (_, Acc) ->
-                  Acc
+          fun (TraceEntry, PathState) ->
+                  path_traverse(TraceEntry, AnalysesData, AccTab, PathState, #{allow_create_new_nodes => true, debug => false})
           end, #{}, Tab),
     NewPathCount = maps:fold(
-                 fun (_, {_, true}, Acc) ->
+                 fun (P, {_, true}, Acc) when is_pid(P) ->
                          Acc + 1;
-                     (_, {_, false}, Acc) ->
+                     (P, {_, false}, Acc) when is_pid(P) ->
+                         Acc;
+                     (_, _, Acc) ->
                          Acc
-                 end, 0, ProcState),
+                  end, 0, PathState),
+    case maps:get(verbose_racing_path_flag_stat, ExtraOpts, false) of
+        true ->
+            io:format(user, "Total ~w, Racing ~w, Racing FP ~w, FN ~w~n",
+                      [maps:get(total_op, PathState, 0),
+                       maps:get(racing_op, PathState, 0),
+                       maps:get(racing_fp, PathState, 0),
+                       maps:get(racing_fn, PathState, 0)]);
+        false ->
+            ok
+    end,
     ets:update_counter(AccTab, path_coverage_counter, NewPathCount),
     ok.
 
@@ -600,7 +654,7 @@ init(Args) ->
     LineCoverage = proplists:get_value(line_coverage, Args, false),
     StateCoverage = proplists:get_value(state_coverage, Args, false),
     ExtraHandlers = proplists:get_value(extra_handlers, Args, []),
-    VerboseFinalize = proplists:get_value(verbose_finalize, Args, false),
+    ExtraOpts = proplists:get_value(extra_opts, Args, []),
     State = #state{ tab = Tab
                   , acc_filename = AccFilename
                   , acc_fork_period = AccForkPeriod
@@ -614,7 +668,7 @@ init(Args) ->
                   , line_coverage = LineCoverage
                   , state_coverage = StateCoverage
                   , extra_handlers = ExtraHandlers
-                  , verbose_finalize = VerboseFinalize
+                  , extra_opts = ExtraOpts
                   },
     {ok, State}.
 
@@ -628,7 +682,7 @@ handle_call({finalize, TraceInfo, SHT},
                   , line_coverage = LC
                   , state_coverage = SC
                   , extra_handlers = ExtraHandlers
-                  , verbose_finalize = VerboseFinalize
+                  , extra_opts = _ExtraOpts
                   }
             = State)
   when Tab =/= undefined, AF =/= undefined ->
@@ -648,7 +702,7 @@ handle_call({finalize, TraceInfo, SHT},
     end,
     case PC of
         true ->
-            merge_path_coverage(Tab, AccTab, R1),
+            merge_path_coverage(State, Tab, AccTab, R1),
             [{path_coverage_counter, PathCoverageCount}] = ets:lookup(AccTab, path_coverage_counter),
             io:format(user, "path coverage count = ~p~n", [PathCoverageCount]);
         false ->
@@ -683,12 +737,6 @@ handle_call({finalize, TraceInfo, SHT},
                fun ({HandlerMod, HandlerState}, AccR) ->
                        HandlerMod:handle_trace(HandlerState, Tab, AccR)
                end, R1, ExtraHandlers),
-    case VerboseFinalize of
-        true ->
-            io:format(user, "Tracer finalize => ~p~n", [RFinal]);
-        false ->
-            ok
-    end,
     {reply, RFinal, State};
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.

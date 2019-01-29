@@ -773,7 +773,7 @@ ctl_call_can_buffer({undet}) -> false;
 ctl_call_can_buffer(_) -> true.
 
 is_send_req(?cci_send_msg(_, _, _)) -> true;
-is_send_req(?cci_send_signal(_, _, _)) -> true;
+%% is_send_req(?cci_send_signal(_, _, _)) -> true;
 is_send_req(_) -> false.
 
 ctl_call_to_delay(true, {nodelay, _}) -> false;
