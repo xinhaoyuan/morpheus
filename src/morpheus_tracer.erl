@@ -4,6 +4,8 @@
 
 %% API.
 -export([ start_link/1
+        , set_sht/2
+        , predict_racing/5
         , trace_call/4
         , trace_new_process/5
         , trace_send/7
@@ -16,7 +18,7 @@
         , calc_acc_fanout/1
         ]).
 
--export([ simplify/2 ]).
+-export([ simplify/2, simplify_sht/2 ]).
 
 %% gen_server.
 -export([ init/1
@@ -26,8 +28,12 @@
         , terminate/2
         , code_change/3]).
 
--record(state, { tab                     :: ets:tid()
+-record(state, { sht                     :: ets:tid()
+               , tab                     :: ets:tid()
                , acc_filename            :: string()
+               , acc_tab                 :: ets:tid()
+               , to_predict              :: boolean()
+               , pred_state              :: term()
                , acc_fork_period         :: integer()
                , dump_traces             :: boolean()
                , dump_traces_verbose     :: boolean()
@@ -39,7 +45,7 @@
                , line_coverage           :: boolean()
                , state_coverage          :: boolean()
                , extra_handlers          :: [module()]
-               , extra_opts             :: #{}
+               , extra_opts              :: #{}
                }).
 
 -include("morpheus_trace.hrl").
@@ -52,20 +58,26 @@
 start_link(Args) ->
     gen_server:start_link(?MODULE, Args, []).
 
+set_sht(T, SHT) ->
+    gen_server:call(T, {set_sht, SHT}, infinity).
+
+predict_racing(T, Where, From, To, Content) ->
+    gen_server:call(T, {predict_racing, Where, From, To, Content}, infinity).
+
 trace_call(T, From, Where, Req) ->
-    gen_server:cast(T, {call, From, Where, Req}).
+    gen_server:call(T, {add_trace, {call, From, Where, Req}}, infinity).
 
 trace_new_process(T, Proc, AbsId, Creator, EntryInfo) ->
-    gen_server:cast(T, {new_process, Proc, AbsId, Creator, EntryInfo}).
+    gen_server:call(T, {add_trace, {new_process, Proc, AbsId, Creator, EntryInfo}}, infinity).
 
 trace_send(T, Where, From, To, Type, Content, Effect) ->
-    gen_server:cast(T, {send, Where, From, To, Type, Content, Effect}).
+    gen_server:call(T, {add_trace, {send, Where, From, To, Type, Content, Effect}}, infinity).
 
 trace_receive(T, Where, To, Type, Content) ->
-    gen_server:cast(T, {recv, Where, To, Type, Content}).
+    gen_server:call(T, {add_trace, {recv, Where, To, Type, Content}}, infinity).
 
 trace_report_state(T, TraceInfo, State) ->
-    gen_server:cast(T, {report_state, TraceInfo, State}).
+    gen_server:call(T, {add_trace, {report_state, TraceInfo, State}}, infinity).
 
 finalize(T, TraceInfo, SHT) ->
     gen_server:call(T, {finalize, TraceInfo, SHT}, infinity).
@@ -137,6 +149,12 @@ analyze_partial_order(#state{find_races = FindRaces, simplify_po_trace = Simplif
                   To = simplify(ToX, SimpMap),
                   #{To := VC} = LVC,
                   #{To := MQ} = MQM,
+                  case maps:is_key(Content, MQ) of
+                      false ->
+                          io:format(user, "??? ~p cannot find in ~p", [Content, MQ]);
+                      true ->
+                          ok
+                  end,
                   #{Content := Q} = MQ,
                   {{value, MsgVC}, H1} = queue:out(Q),
                   VC1 = merge_vc(VC, MsgVC),
@@ -412,12 +430,12 @@ path_traverse(TraceEntry, #{simp_map := SimpMap} = AnalysesData, AccTab, PathSta
             end;
         ?TraceRecv(_, Where, To, Type, Content) ->
             case maps:is_key(To, PathState) of
-                true when AllowCreate ->
+                true ->
                     #{To := {StateNode, _}} = PathState,
                     SimpContent = simplify(Content, SimpMap),
                     Branch = {recv, Where, Type, SimpContent},
                     case ets:lookup(AccTab, {StateNode, Branch}) of
-                        [] ->
+                        [] when AllowCreate ->
                             case Debug of
                                 true ->
                                     AvailableBranch = ets:match(AccTab, {{StateNode, '$1'}, '_'}),
@@ -441,6 +459,52 @@ path_traverse(TraceEntry, #{simp_map := SimpMap} = AnalysesData, AccTab, PathSta
             PathState
     end.
 
+%% Almost path_traverse but for online prediction
+path_prediction_traverse(TraceEntry, SHT, AccTab, PathState) ->
+    case TraceEntry of
+        ?TraceNewProcess(_, Proc, _AbsId, _Creator, EntryInfo) ->
+            [{root, Root}] = ets:lookup(AccTab, root),
+            Branch = {new, simplify_sht(Proc, SHT), simplify_sht(EntryInfo, SHT)},
+            case ets:lookup(AccTab, {Root, Branch}) of
+                [] ->
+                    maps:remove(Proc, PathState);
+                [{_, Next}] ->
+                    PathState#{Proc => Next}
+            end;
+         ?TraceSend(_, Where, From, To, Type, Content, _Effect) ->
+            case maps:is_key(From, PathState) of
+                true ->
+                    #{From := StateNode} = PathState,
+                    SimpContent = simplify_sht(Content, SHT),
+                    Branch = {send, Where, simplify_sht(To, SHT), Type, SimpContent},
+                    case ets:lookup(AccTab, {StateNode, Branch}) of
+                        [] ->
+                            maps:remove(From, PathState);
+                        [{_, Next}] ->
+                            PathState#{From := Next}
+                    end;
+                false ->
+                    PathState
+            end;
+        ?TraceRecv(_, Where, To, Type, Content) ->
+            case maps:is_key(To, PathState) of
+                true ->
+                    #{To := StateNode} = PathState,
+                    SimpContent = simplify_sht(Content, SHT),
+                    Branch = {recv, Where, Type, SimpContent},
+                    case ets:lookup(AccTab, {StateNode, Branch}) of
+                        [] ->
+                            maps:remove(To, PathState);
+                        [{_, Next}] ->
+                            PathState#{To := Next}
+                    end;
+                false ->
+                    PathState
+            end;
+        _ ->
+            PathState
+    end.
+
 %% Merge per-actor path.
 merge_path_coverage(#state{extra_opts = ExtraOpts}, Tab, AccTab, AnalysesData) ->
     PathState =
@@ -456,9 +520,9 @@ merge_path_coverage(#state{extra_opts = ExtraOpts}, Tab, AccTab, AnalysesData) -
                      (_, _, Acc) ->
                          Acc
                   end, 0, PathState),
-    case maps:get(verbose_racing_path_flag_stat, ExtraOpts, false) of
+    case maps:get(verbose_racing_prediction_stat, ExtraOpts, false) of
         true ->
-            io:format(user, "Total ~w, Racing ~w, Racing FP ~w, FN ~w~n",
+            io:format(user, "Prefix prediction: total ~w, racing ~w, FP ~w, FN ~w~n",
                       [maps:get(total_op, PathState, 0),
                        maps:get(racing_op, PathState, 0),
                        maps:get(racing_fp, PathState, 0),
@@ -470,35 +534,86 @@ merge_path_coverage(#state{extra_opts = ExtraOpts}, Tab, AccTab, AnalysesData) -
     ok.
 
 %% Merge line coverage (approximately).
-merge_line_coverage(Tab, AccTab) ->
-    ets:foldl(
-      fun (?TraceCall(_, _From, Where, _Req), Acc) ->
-              case ets:insert_new(AccTab, {{line_coverage, Where}, 1}) of
-                  true ->
-                      ets:update_counter(AccTab, line_coverage_counter, 1);
-                  false ->
-                      ets:update_counter(AccTab, {line_coverage, Where}, 1)
-              end,
-              Acc;
-          (?TraceSend(_, Where, _From, _To, _Type, _Content, _Effect), Acc) ->
-              case ets:insert_new(AccTab, {{line_coverage, Where}, 1}) of
-                  true ->
-                      ets:update_counter(AccTab, line_coverage_counter, 1);
-                  false ->
-                      ets:update_counter(AccTab, {line_coverage, Where}, 1)
-              end,
-              Acc;
-          (?TraceRecv(_, Where, _To, _Type, _Content), Acc) ->
-              case ets:insert_new(AccTab, {{line_coverage, Where}, 1}) of
-                  true ->
-                      ets:update_counter(AccTab, line_coverage_counter, 1);
-                  false ->
-                      ets:update_counter(AccTab, {line_coverage, Where}, 1)
-              end,
-              Acc;
-          (_, Acc) ->
-              Acc
-      end, undefined, Tab).
+merge_line_coverage(#state{extra_opts = ExtraOpts}, Tab, AccTab, #{simp_map := SimpMap} = AnalysesData) ->
+    Result =
+        ets:foldl(
+          fun (?TraceCall(_, _From, Where, _Req), Acc) ->
+                  case ets:insert_new(AccTab, {{line_coverage, Where}, 1}) of
+                      true ->
+                          ets:update_counter(AccTab, line_coverage_counter, 1);
+                      false ->
+                          ets:update_counter(AccTab, {line_coverage, Where}, 1)
+                  end,
+                  Acc;
+              (?TraceSend(TID, Where, From, _To, _Type, _Content, _Effect), Acc) ->
+                  case ets:insert_new(AccTab, {{line_coverage, Where}, 1}) of
+                      true ->
+                          ets:update_counter(AccTab, line_coverage_counter, 1);
+                      false ->
+                          ets:update_counter(AccTab, {line_coverage, Where}, 1)
+                  end,
+                  case is_pid(From) of
+                      true ->
+                          P = simplify(From, SimpMap),
+                          case maps:is_key(racing_tids, AnalysesData) andalso
+                              sets:is_element(TID, maps:get(racing_tids, AnalysesData)) of
+                              true ->
+                                  Acc1 = 
+                                      case ets:insert_new(AccTab, {{racing_loc, Where}, 1}) of
+                                          true ->
+                                              Acc#{racing_fn => 1 + maps:get(racing_fn, Acc, 0)};
+                                          false ->
+                                              ets:update_counter(AccTab, {racing_loc, Where}, 1),
+                                              Acc
+                                      end,
+                                  case ets:insert_new(AccTab, {{racing_proc_loc, {P, Where}}, 1}) of
+                                      true ->
+                                          Acc1#{pl_racing_fn => 1 + maps:get(pl_racing_fn, Acc, 0)};
+                                      false ->
+                                          ets:update_counter(AccTab, {racing_proc_loc, {P, Where}}, 1),
+                                          Acc1
+                                  end;
+                              false ->
+                                  Acc1 =
+                                      case ets:lookup(AccTab, {racing_loc, Where}) of
+                                          [] ->
+                                              Acc;
+                                          _ ->
+                                              Acc#{racing_fp => 1 + maps:get(racing_fp, Acc, 0)}
+                                      end,
+                                  case ets:lookup(AccTab, {racing_proc_loc, {P, Where}}) of
+                                      [] ->
+                                          Acc1;
+                                      _ ->
+                                          Acc1#{pl_racing_fp => 1 + maps:get(pl_racing_fp, Acc, 0)}
+                                  end
+                          end;
+                      false ->
+                          Acc
+                  end;
+              (?TraceRecv(_, Where, _To, _Type, _Content), Acc) ->
+                  case ets:insert_new(AccTab, {{line_coverage, Where}, 1}) of
+                      true ->
+                          ets:update_counter(AccTab, line_coverage_counter, 1);
+                      false ->
+                          ets:update_counter(AccTab, {line_coverage, Where}, 1)
+                  end,
+                  Acc;
+              (_, Acc) ->
+                  Acc
+          end, #{}, Tab),
+    case maps:get(verbose_racing_prediction_stat, ExtraOpts, false) of
+        true ->
+            io:format(user, "Location prediction: FP ~w, FN ~w~n",
+                      [maps:get(racing_fp, Result, 0),
+                       maps:get(racing_fn, Result, 0)]),
+            io:format(user, "Proc-location prediction: FP ~w, FN ~w~n",
+                      [maps:get(pl_racing_fp, Result, 0),
+                       maps:get(pl_racing_fn, Result, 0)]);
+        false ->
+            ok
+    end,
+    ok.
 
 %% ==== State Coverage ====
 
@@ -604,6 +719,43 @@ simplify(Data, _SimpMap) when is_function(Data) ->
 simplify(Data, _SimpMap) ->
     Data.
 
+simplify_sht(D, undefined) ->
+    D;
+simplify_sht([H | T], SimpSHT) ->
+    [simplify_sht(H, SimpSHT) | simplify_sht(T, SimpSHT)];
+simplify_sht(Data, SimpSHT) when is_tuple(Data) ->
+    %% The magic size is from experiments on OTP-20
+    case size(Data) > 0 andalso element(1, Data) of
+        dict when size(Data) =:= 9 ->
+            {dict, simplify_sht(dict:to_list(Data), SimpSHT)};
+        set when size(Data) =:= 9 ->
+            {set, simplify_sht(sets:to_list(Data), SimpSHT)};
+        _ ->
+            list_to_tuple(simplify_sht(tuple_to_list(Data), SimpSHT))
+    end;
+simplify_sht(Data, SimpSHT) when is_map(Data) ->
+    maps:fold(
+      fun (K, V, Acc) ->
+              Acc#{simplify_sht(K, SimpSHT) => simplify_sht(V, SimpSHT)}
+      end, #{}, Data);
+simplify_sht(Data, SimpSHT) when is_pid(Data) ->
+    case ets:lookup(SimpSHT, {proc_abs_id, Data}) of
+        [] -> Data;
+        [{{proc_abs_id, Data}, Id}] -> Id
+    end;
+simplify_sht(Data, SimpSHT) when is_reference(Data) ->
+    case ets:lookup(SimpSHT, {ref_abs_id, Data}) of
+        [] -> Data;
+        [{{ref_abs_id, Data}, {Pid, CreationCount}}] ->
+            {simplify_sht(Pid, SimpSHT), CreationCount}
+    end;
+simplify_sht(Data, _SimpSHT) when is_function(Data) ->
+    %% Function? Ignore for now...
+    {function};
+simplify_sht(Data, _SimpSHT) ->
+    Data.
+
+
 %% For a accumulated table, calculate the path tree fanout function
 %%   f(d) := how many path node are at the depth d
 %% Returns {MaxDepth, f}, where f has key from [0, MaxDepth]
@@ -644,6 +796,7 @@ init(Args) ->
         end,
     AccFilename = proplists:get_value(acc_filename, Args, undefined),
     AccForkPeriod = proplists:get_value(acc_fork_period, Args, 0),
+    ToPredict = proplists:get_value(to_predict, Args, false),
     DumpTraces = proplists:get_value(dump_traces, Args, false),
     DumpTracesVerbose = proplists:get_value(dump_traces_verbose, Args, false),
     DumpPOTraces = proplists:get_value(dump_po_traces, Args, false),
@@ -654,10 +807,26 @@ init(Args) ->
     LineCoverage = proplists:get_value(line_coverage, Args, false),
     StateCoverage = proplists:get_value(state_coverage, Args, false),
     ExtraHandlers = proplists:get_value(extra_handlers, Args, []),
-    ExtraOpts = proplists:get_value(extra_opts, Args, []),
-    State = #state{ tab = Tab
+    ExtraOpts = proplists:get_value(extra_opts, Args, #{}),
+    AccTab =
+        case AccFilename of
+            undefined -> undefined;
+            _ ->
+                open_or_create_acc_ets_tab(AccFilename)
+        end,
+    State = #state{ sht = undefined
+                  , tab = Tab
                   , acc_filename = AccFilename
+                  , acc_tab = AccTab
                   , acc_fork_period = AccForkPeriod
+                  , to_predict = ToPredict
+                  , pred_state =
+                        case ToPredict of
+                            true ->
+                                #{};
+                            false ->
+                                undefined
+                        end
                   , dump_traces = DumpTraces
                   , dump_traces_verbose = DumpTracesVerbose
                   , dump_po_traces = DumpPOTraces
@@ -672,10 +841,13 @@ init(Args) ->
                   },
     {ok, State}.
 
+handle_call({set_sht, SHT}, _From, State) ->
+    {reply, ok, State#state{sht = SHT}};
 handle_call({finalize, TraceInfo, SHT},
             _From,
             #state{ tab = Tab
                   , acc_filename = AF
+                  , acc_tab = AccTab
                   , acc_fork_period = AFP
                   , po_coverage = POC
                   , path_coverage = PC
@@ -685,8 +857,7 @@ handle_call({finalize, TraceInfo, SHT},
                   , extra_opts = _ExtraOpts
                   }
             = State)
-  when Tab =/= undefined, AF =/= undefined ->
-    AccTab = open_or_create_acc_ets_tab(AF),
+  when Tab =/= undefined, AccTab =/= undefined ->
     IC = ets:update_counter(AccTab, iteration_counter, 1),
     ets:insert(AccTab, {{iteration_info, IC}, TraceInfo}),
     R0 = #{simp_map => extract_simplify_map(SHT)},
@@ -710,7 +881,7 @@ handle_call({finalize, TraceInfo, SHT},
     end,
     case LC of
         true ->
-            merge_line_coverage(Tab, AccTab),
+            merge_line_coverage(State, Tab, AccTab, R1),
             [{line_coverage_counter, LineCoverageCount}] = ets:lookup(AccTab, line_coverage_counter),
             io:format(user, "line coverage count = ~p~n", [LineCoverageCount]);
         false ->
@@ -738,6 +909,57 @@ handle_call({finalize, TraceInfo, SHT},
                        HandlerMod:handle_trace(HandlerState, Tab, AccR)
                end, R1, ExtraHandlers),
     {reply, RFinal, State};
+handle_call({add_trace, {call, From, Where, Req}}, _From, #state{tab = Tab} = State) when Tab =/= undefined ->
+    TC = ets:update_counter(Tab, trace_counter, 1),
+    Event = ?TraceCall(TC, From, Where, Req),
+    ets:insert(Tab, Event),
+    {reply, ok, maybe_update_prediction_state(State, Event)};
+handle_call({add_trace, {new_process, Proc, AbsId, Creator, EntryInfo}}, _From, #state{tab = Tab} = State) when Tab =/= undefined ->
+    TC = ets:update_counter(Tab, trace_counter, 1),
+    Event = ?TraceNewProcess(TC, Proc, AbsId, Creator, EntryInfo),
+    ets:insert(Tab, Event),
+    {reply, ok, maybe_update_prediction_state(State, Event)};
+handle_call({add_trace, {send, Where, From, To, Type, Content, Effect}}, _From, #state{tab = Tab} = State) when Tab =/= undefined->
+    TC = ets:update_counter(Tab, trace_counter, 1),
+    Event = ?TraceSend(TC, Where, From, To, Type, Content, Effect),
+    ets:insert(Tab, Event),
+    {reply, ok, maybe_update_prediction_state(State, Event)};
+handle_call({add_trace, {recv, Where, To, Type, Content}}, _From, #state{tab = Tab} = State) when Tab =/= undefined ->
+    TC = ets:update_counter(Tab, trace_counter, 1),
+    Event = ?TraceRecv(TC, Where, To, Type, Content),
+    ets:insert(Tab, Event),
+    {reply, ok, maybe_update_prediction_state(State, Event)};
+handle_call({add_trace, {report_state, TraceInfo, RState}}, _From, #state{tab = Tab} = State) when Tab =/= undefined ->
+    TC = ets:update_counter(Tab, trace_counter, 1),
+    Event = ?TraceReportState(TC, TraceInfo, RState),
+    ets:insert(Tab, Event),
+    {reply, ok, maybe_update_prediction_state(State, Event)};
+handle_call({predict_racing, Where, From, To, Content} = Req, _From, #state{sht = SHT, pred_state = PredState, acc_tab = AccTab} = State) ->
+    {Reply, Hit} = 
+        case State#state.to_predict of
+            false ->
+                {true, false};
+            true ->
+                case maps:is_key(From, PredState) of
+                    true ->
+                        Branch = {send, Where, simplify_sht(To, SHT), message, simplify_sht(Content, SHT)},
+                        case ets:lookup(AccTab, {maps:get(From, PredState), Branch}) of
+                            [] ->
+                                {true, false};
+                            [{_, EventId}] ->
+                                case ets:lookup(AccTab, {racing_path_flag, EventId}) of
+                                    [] ->
+                                        {false, true};
+                                    _ ->
+                                        {true, true}
+                                end
+                        end;
+                    false ->
+                        {true, false}
+                end
+        end,
+    io:format(user, "Tracer ~p => ~w (hit: ~w)~n", [Req, Reply, Hit]), 
+    {reply, Reply, State};
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.
 
@@ -755,8 +977,10 @@ maybe_extract_partial_order_info(#state{find_races = FindRaces, po_coverage = PO
                 Other ->
                     io:format(user,
                               "Unexpected result from analyze_partail_order:~n"
-                              "  ~p~n",
-                              [Other]),
+                              "  ~p~n"
+                              "The trace:~n"
+                              "~p~n",
+                              [Other, ets:match(Tab, '$1')]),
                     FinalData
             end;
         false ->
@@ -764,29 +988,14 @@ maybe_extract_partial_order_info(#state{find_races = FindRaces, po_coverage = PO
     end.
 
 
-handle_cast({call, From, Where, Req}, #state{tab = Tab} = State) when Tab =/= undefined ->
-    TC = ets:update_counter(Tab, trace_counter, 1),
-    ets:insert(Tab, ?TraceCall(TC, From, Where, Req)),
-    {noreply, State};
-handle_cast({new_process, Proc, AbsId, Creator, EntryInfo}, #state{tab = Tab} = State) when Tab =/= undefined ->
-    TC = ets:update_counter(Tab, trace_counter, 1),
-    ets:insert(Tab, ?TraceNewProcess(TC, Proc, AbsId, Creator, EntryInfo)),
-    {noreply, State};
-handle_cast({send, Where, From, To, Type, Content, Effect}, #state{tab = Tab} = State) when Tab =/= undefined->
-    TC = ets:update_counter(Tab, trace_counter, 1),
-    ets:insert(Tab, ?TraceSend(TC, Where, From, To, Type, Content, Effect)),
-    {noreply, State};
-handle_cast({recv, Where, To, Type, Content}, #state{tab = Tab} = State) when Tab =/= undefined ->
-    TC = ets:update_counter(Tab, trace_counter, 1),
-    ets:insert(Tab, ?TraceRecv(TC, Where, To, Type, Content)),
-    {noreply, State};
-handle_cast({report_state, TraceInfo, RState}, #state{tab = Tab} = State) when Tab =/= undefined ->
-    TC = ets:update_counter(Tab, trace_counter, 1),
-    ets:insert(Tab, ?TraceReportState(TC, TraceInfo, RState)),
-    {noreply, State};
-handle_cast(Msg, State) ->
-    io:format(user, "Unknown trace cast ~p~n", [Msg]),
+handle_cast(_Msg, State) ->
     {noreply, State}.
+
+maybe_update_prediction_state(#state{to_predict = true, sht = SHT, pred_state = PredState, acc_tab = AccTab, po_coverage = true, path_coverage = true, find_races = true} = State, Trace) ->
+    PredState1 = path_prediction_traverse(Trace, SHT, AccTab, PredState),
+    State#state{pred_state = PredState1};
+maybe_update_prediction_state(State, _) ->
+    State.
 
 handle_info(_Info, State) ->
     {noreply, State}.

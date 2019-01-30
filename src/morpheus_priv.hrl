@@ -139,3 +139,6 @@
 
 -define(cc_get_advice(Ctl, Where),
         call_ctl(Ctl, Where, ?cci_get_advice())).
+
+-define(cc_trace_receive(Ctl, Where, To, Type, Content),
+        call_ctl(Ctl, Where, ?cci_trace_receive(To, Type, Content))).
