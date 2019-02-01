@@ -873,7 +873,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S, _Where, {receive_prepare, P
                 {0, PT};
             {_, {forwarded_counter, C}} ->
                 {message_queue_len, QL} = erlang:process_info(Pid, message_queue_len),
-                ?INFO("??? ~w ~w", [QL, C]),
+                ?INFO("pending external queue size ~w, forwarded ~w", [QL, C]),
                 {C, ?TABLE_REMOVE(PT, {receive_status, Pid})}
         end,
     PT2 = ?TABLE_SET(PT1, {receive_status, Pid}, prepared),
@@ -2311,7 +2311,7 @@ handle(Old, New, Tag, Args, Ann) ->
                                      F(N - 1)
                              after
                                  0 ->
-                                     ?WARNING("unexpected end of messages ??? expected length: ~w, now ~w",
+                                     ?WARNING("unexpected end of messages? expected length: ~w, now ~w",
                                               [UndetMsgsToOmit, UndetMsgsToOmit - N]),
                                      ok
                              end;
