@@ -5,11 +5,14 @@
 %% API.
 -export([ start_link/1
         , set_sht/2
-        , predict_racing/5
+        , predict_racing/4
+        , trace_schedule/4
         , trace_call/4
         , trace_new_process/5
         , trace_send/7
         , trace_receive/5
+        , trace_read/2
+        , trace_write/2
         , trace_report_state/3
         , finalize/3
         , create_ets_tab/0
@@ -28,25 +31,47 @@
         , terminate/2
         , code_change/3]).
 
--record(state, { sht                     :: ets:tid()
-               , tab                     :: ets:tid()
-               , acc_filename            :: string()
-               , acc_tab                 :: ets:tid()
-               , to_predict              :: boolean()
-               , pred_state              :: term()
-               , acc_fork_period         :: integer()
-               , dump_traces             :: boolean()
-               , dump_traces_verbose     :: boolean()
-               , dump_po_traces          :: new | all | false
-               , find_races              :: boolean()
-               , simplify_po_trace       :: boolean()
-               , po_coverage             :: boolean()
-               , path_coverage           :: boolean()
-               , line_coverage           :: boolean()
-               , state_coverage          :: boolean()
-               , extra_handlers          :: [module()]
-               , extra_opts              :: #{}
-               }).
+-record(state,
+        { sht                     :: ets:tid()
+        , tab                     :: ets:tid()
+        , acc_filename            :: string()
+        , acc_tab                 :: ets:tid()
+        , to_predict              :: boolean()
+        , pred_state              :: term()
+        , acc_fork_period         :: integer()
+        , dump_traces             :: boolean()
+        , dump_traces_verbose     :: boolean()
+        , dump_po_traces          :: new | all | false
+        , find_races              :: boolean()
+        , simplify_po_trace       :: boolean()
+        , po_coverage             :: boolean()
+        , path_coverage           :: boolean()
+        , line_coverage           :: boolean()
+        , state_coverage          :: boolean()
+        , extra_handlers          :: [module()]
+        , extra_opts              :: #{}
+        }).
+
+%% internal state for building partial order dependency
+-record(po_state,
+        { sch_vc                :: dict:dict(integer(), #{})
+        , sch_dep_vc            :: dict:dict(integer(), #{})
+        , sch_pi                :: dict:dict(integer(), {pid(), integer()}) %% index starts from 1
+        , sch_info              :: dict:dict(integer(), {pid(), term()})
+        , last_sch              :: integer()
+        , last_sch_access       :: dict:dict(term(), read | write)
+        , last_sch_dep          :: [integer()]
+        , last_sch_may_dep      :: [integer()]
+        , last_sch_may_conflict :: [integer()]
+        , last_sch_aux_send     :: sets:set(pid())
+        , local_last_sch        :: dict:dict(pid(), integer())
+        , local_sch_history     :: dict:dict(pid(), [integer()])
+        , local_msg_queue       :: dict:dict(pid(), dict:dict(term(), queue:queue(integer())))
+        , local_msg_sch         :: dict:dict(pid(), [integer()])
+        , var_write_sch         :: dict:dict(term(), [integer()])
+        , var_read_sch          :: dict:dict(term(), [integer()])
+        , conflicts             :: [{integer(), [integer()]}]
+        }).
 
 -include("morpheus_trace.hrl").
 
@@ -61,8 +86,11 @@ start_link(Args) ->
 set_sht(T, SHT) ->
     gen_server:call(T, {set_sht, SHT}, infinity).
 
-predict_racing(T, Where, From, To, Content) ->
-    gen_server:call(T, {predict_racing, Where, From, To, Content}, infinity).
+predict_racing(T, Where, Proc, Info) ->
+    gen_server:call(T, {predict_racing, Where, Proc, Info}, infinity).
+
+trace_schedule(T, Where, Proc, Info) ->
+    gen_server:call(T, {add_trace, {schedule, Where, Proc, Info}}, infinity).
 
 trace_call(T, From, Where, Req) ->
     gen_server:call(T, {add_trace, {call, From, Where, Req}}, infinity).
@@ -75,6 +103,12 @@ trace_send(T, Where, From, To, Type, Content, Effect) ->
 
 trace_receive(T, Where, To, Type, Content) ->
     gen_server:call(T, {add_trace, {recv, Where, To, Type, Content}}, infinity).
+
+trace_read(T, Var) ->
+    gen_server:call(T, {add_trace, {read, Var}}, infinity).
+
+trace_write(T, Var) ->
+    gen_server:call(T, {add_trace, {write, Var}}, infinity).
 
 trace_report_state(T, TraceInfo, State) ->
     gen_server:call(T, {add_trace, {report_state, TraceInfo, State}}, infinity).
@@ -90,8 +124,10 @@ create_ets_tab() ->
 create_acc_ets_tab() ->
     Tab = ets:new(acc_tab, []),
     ets:insert(Tab, {iteration_counter, 0}),
-    ets:insert(Tab, {root, 1}),
-    ets:insert(Tab, {node_counter, 1}),
+    ets:insert(Tab, {path_root, 1}),
+    ets:insert(Tab, {{path_branch_counter, 1}, 0}),
+    ets:insert(Tab, {{path_hit_counter, 1}, 0}),
+    ets:insert(Tab, {path_node_counter, 1}),
     ets:insert(Tab, {po_coverage_counter, 0}),
     ets:insert(Tab, {path_coverage_counter, 0}),
     ets:insert(Tab, {line_coverage_counter, 0}),
@@ -117,197 +153,350 @@ merge_vc(VC1, VC2) ->
               Acc#{K => max(V, maps:get(K, VC2, 0))}
       end, VC2, VC1).
 
-analyze_partial_order(#state{find_races = FindRaces, simplify_po_trace = SimplifyPOTrace} = _State, Tab, SimpMap) ->
-    %% Reconstruct the trace according to vector clocks.
-    %% And detect racing operations.
-    %% Traces with the same reconstructed vector clocks are po-equivalent.
-    %% Thus we can count how many partial orders has been covered.
-    %%
-    %% For now, we only consider creation, recv, and send operations.
-    %% To rebuild recv-send dependency, we need to rebuild the message history for each process.
-    %%
-    %% XXX I am not sure how to deal with ETS yet. Probably I would treat each ETS table as a process.
-    #{proc_operation_map := POMReversed, races := Races, aux_serialization := AuxSerialization} =
-        ets:foldl(
-          fun (?TraceNewProcess(_, ProcX, _AbsId, CreatorX, _EntryInfo),
-               #{local_vc_map := LVC, inbox_vc_map := IBM, message_queue_map := MQM, message_history_map := MHM, proc_operation_map := POM} = ProcState) ->
-                  %% When a new process is created the created process inherit the creator's VC.
-                  Proc = simplify(ProcX, SimpMap), Creator = simplify(CreatorX, SimpMap),
-                  %% The creator could be initial, which has no record in state
-                  VC = (maps:get(Creator, LVC, #{})),
-                  ProcState#{ local_vc_map := LVC#{Proc => VC}
-                            , inbox_vc_map := IBM#{Proc => VC}
-                            , message_queue_map := MQM#{Proc => #{}}
-                            , message_history_map := MHM#{Proc => []}
-                            , proc_operation_map := POM#{Proc => []}
-                            };
+dict_get(K, D) ->
+    dict:fetch(K, D).
 
-              (?TraceRecv(_Id, _Where, ToX, message, Content),
-               #{local_vc_map := LVC, message_queue_map := MQM} = ProcState) ->
-                  %% Receive of the message needs to happens after the sending operation
-                  %% Note that for now only message receive is in scope, others (e.g. signals, timeouts) are ignored for now.
-                  To = simplify(ToX, SimpMap),
-                  #{To := VC} = LVC,
-                  #{To := MQ} = MQM,
-                  case maps:is_key(Content, MQ) of
+dict_get(K, D, U) ->
+    case dict:find(K, D) of
+        {ok, Value} ->
+            Value;
+        error ->
+            U
+    end.
+
+%% 1. Compute the VC and DepVC of the last sch
+%% 2. Find out conflicting schs
+handle_last_sch(#po_state{ sch_vc = SchVC
+                         , sch_dep_vc = SchDepVC
+                         , sch_pi = SchPI
+                         , last_sch = LastSch
+                         , last_sch_dep = LSDep
+                         , last_sch_may_dep = LSMayDep
+                         , last_sch_may_conflict = LSMayConflict
+                         , conflicts = Conflicts
+                         } = POState) ->
+    LSUDep = lists:usort(LSDep),
+    LSUMayDep = lists:usort(LSMayDep),
+    LSUMayConflict = lists:usort(LSMayConflict),
+    DepVC =
+        lists:foldl(
+          fun (0, Acc) -> Acc;
+              (DepSch, Acc) when DepSch =:= LastSch -> Acc;
+              (DepSch, Acc) ->
+                  {P, I} = dict_get(DepSch, SchPI),
+                  case I =< maps:get(P, Acc, 0) of
+                      true ->
+                          Acc;
                       false ->
-                          io:format(user, "??? ~p cannot find in ~p", [Content, MQ]);
-                      true ->
-                          ok
-                  end,
-                  #{Content := Q} = MQ,
-                  {{value, MsgVC}, H1} = queue:out(Q),
-                  VC1 = merge_vc(VC, MsgVC),
-                  %% GVC is not changing for the same reason as creation
-                  ProcState#{ local_vc_map := LVC#{To := VC1}
-                            , message_queue_map := MQM#{To := MQ#{Content := H1}}
-                            };
+                          DepSchVC = dict_get(DepSch, SchVC),
+                          merge_vc(DepSchVC, Acc)
+                  end
+          end, #{}, LSUDep ++ (LSUMayDep -- LSUMayConflict)),
 
-              (?TraceSend(TID, _Where, FromX, ToX, _Type, Content, _Effect),
-               #{ local_vc_map := LVC
-                , inbox_vc_map := IBM
-                , message_queue_map := MQM
-                , message_history_map := MHM
-                , aux_serialization := AuxSerialization
-                , proc_operation_map := POM
-                , races := Races} = ProcState) ->
-                  %% Sending message to a process will make it happen after all sending of existing messages, which is in inbox_vc_map
-                  case is_pid(FromX) of
-                      true ->
-                          From = simplify(FromX, SimpMap), To = simplify(ToX, SimpMap),
-                          #{From := VC} = LVC,
-                          Step = maps:get(From, VC, 0),
-                          #{From := PO} = POM,
-                          #{To := IVC} = IBM,
-                          #{To := MQ} = MQM,
-                          #{To := MH} = MHM,
-                          VC1 = merge_vc(IVC, VC),
-                          VC2 = VC1#{From => Step + 1},
-                          RacingOps =
-                              case FindRaces of
+    {P, I} = dict_get(LastSch, SchPI),
+    {VC, SchConflicts} =
+        lists:foldl(
+          fun (0, Acc) -> Acc;
+              (ConfSch, Acc) when ConfSch =:= LastSch -> Acc;
+              (ConfSch, {CurVC, CurConflicts}) ->
+                  {CP, CI} = dict_get(ConfSch, SchPI),
+                  ConfSchVC = dict_get(ConfSch, SchVC),
+                  NewConflicts =
+                      case CI =< maps:get(CP, DepVC, 0) of
+                          true ->
+                              CurConflicts;
+                          false ->
+                              CanHappensBefore =
+                                  maps:fold(
+                                    fun (_, _, true) -> true;
+                                        (IP, II, false) ->
+                                            II > maps:get(IP, DepVC, 0)
+                                    end, false, ConfSchVC),
+                              case CanHappensBefore of
                                   true ->
-                                      lists:foldl(
-                                        fun ({SenderProc, SenderIdx, SenderTID}, Acc) ->
-                                                %% Check if the current send can happens before each message in the queue
-                                                HappensAfter = maps:get(SenderProc, VC, 0),
-                                                case SenderIdx >= HappensAfter of
-                                                    true ->
-                                                        [SenderTID | Acc];
-                                                    false ->
-                                                        Acc
-                                                end
-                                        end, [], MH);
+                                      [ConfSch | CurConflicts];
                                   false ->
-                                      []
-                              end,
-                          Q = queue:in(VC2, maps:get(Content, MQ, queue:new())),
-                          ProcState#{ local_vc_map := LVC#{From := VC2}
-                                    , inbox_vc_map := IBM#{To := VC2}
-                                    , message_queue_map := MQM#{To := MQ#{Content => Q}}
-                                    , message_history_map := MHM#{To := [{From, Step, TID} | MH]}
-                                    , aux_serialization := [From | AuxSerialization]
-                                    , proc_operation_map := POM#{From => [{VC1, {To, Content}} | PO]}
-                                    , races :=
-                                          case RacingOps of
-                                              [] ->
-                                                  Races;
-                                              _ ->
-                                                  [{TID, RacingOps} | Races]
+                                      CurConflicts
+                              end
+                      end,
+                  NewVC =
+                      case CI =< maps:get(CP, CurVC, 0) of
+                          true ->
+                              CurVC;
+                          false ->
+                              merge_vc(ConfSchVC, CurVC)
+                      end,
+                  {NewVC, NewConflicts}
+          end, {DepVC#{P => I}, []}, LSUMayConflict),
+
+    POState#po_state
+        { sch_vc = dict:store(LastSch, VC, SchVC)
+        , sch_dep_vc = dict:store(LastSch, DepVC, SchDepVC)
+        , conflicts = [{LastSch, SchConflicts} | Conflicts]
+        }.
+
+analyze_partial_order(#state{find_races = FindRaces, simplify_po_trace = _SimplifyPOTrace} = _State, Tab, SimpMap) ->
+    #po_state
+        { sch_vc = SchVC
+        , local_sch_history = LSH
+        , conflicts = Conflicts
+        } = handle_last_sch(
+              ets:foldl(
+                fun (?TraceNewProcess(_, Proc, _, _, _),
+                     #po_state{ last_sch = LastSch
+                              , local_last_sch = LLS
+                              , local_sch_history = LSH
+                              , local_msg_queue = LMQ
+                              , local_msg_sch = LMS
+                              } = POState) ->
+                        POState#po_state{ local_last_sch = dict:store(Proc, LastSch, LLS)
+                                        , local_sch_history = dict:store(Proc, [], LSH)
+                                        , local_msg_queue = dict:store(Proc, dict:new(), LMQ)
+                                        , local_msg_sch = dict:store(Proc, [], LMS)
+                                        };
+
+                    (?TraceSchedule(TID, _Where, Proc, Content),
+                     POState) ->
+                        #po_state{ sch_pi = SchPI
+                                 , sch_info = SchInfo
+                                 , local_sch_history = LSH
+                                 , local_last_sch = LLS
+                                 } = POState1 = handle_last_sch(POState),
+                        SH = dict_get(Proc, LSH),
+                        Pre = dict_get(Proc, LLS),
+                        POState1#po_state{ sch_pi = dict:store(TID, {Proc, length(SH) + 1}, SchPI)
+                                         , sch_info = dict:store(TID, {Proc, Content}, SchInfo)
+                                         , last_sch = TID
+                                         , last_sch_access = dict:new()
+                                         , last_sch_dep = [Pre]
+                                         , last_sch_may_dep = []
+                                         , last_sch_may_conflict = []
+                                         , last_sch_aux_send = sets:new()
+                                         , local_last_sch = dict:store(Proc, TID, LLS)
+                                         , local_sch_history = dict:store(Proc, [TID | SH], LSH)
+                                         };
+
+                    (?TraceWrite(_Id, Var),
+                     #po_state{ last_sch = LastSch
+                              , last_sch_access = LSAccess
+                              , last_sch_may_conflict = LSMayConflict
+                              , var_write_sch = VWSch
+                              , var_read_sch = VRSch
+                              } = POState) ->
+                        ToSkip =
+                            case dict:find(Var, LSAccess) of
+                                {ok, write} -> true;
+                                {ok, read} -> false;
+                                error -> false
+                            end,
+                        case ToSkip of
+                            true -> POState;
+                            false ->
+                                WSch = dict_get(Var, VWSch, []),
+                                RSch = dict_get(Var, VRSch, []),
+                                POState#po_state
+                                    { last_sch_access = dict:store(Var, write, LSAccess)
+                                    , last_sch_may_conflict = RSch ++ WSch ++ LSMayConflict
+                                    , var_write_sch = dict:store(Var, [LastSch | WSch], VWSch)
+                                    }
+                        end;
+
+                    (?TraceRead(_Id, Var),
+                     #po_state{ last_sch = LastSch
+                              , last_sch_access = LSAccess
+                              , last_sch_may_conflict = LSMayConflict
+                              , var_write_sch = VWSch
+                              , var_read_sch = VRSch
+                              } = POState) ->
+                        ToSkip =
+                            case dict:find(Var, LSAccess) of
+                                {ok, write} -> true;
+                                {ok, read} -> true;
+                                error -> false
+                            end,
+                        case ToSkip of
+                            true -> POState;
+                            false ->
+                                WSch = dict_get(Var, VWSch, []),
+                                RSch = dict_get(Var, VRSch, []),
+                                POState#po_state
+                                    { last_sch_access = dict:store(Var, read, LSAccess)
+                                    , last_sch_may_conflict = WSch ++ LSMayConflict
+                                    , var_read_sch = dict:store(Var, [LastSch | RSch], VRSch)
+                                    }
+                        end;
+
+                    (?TraceRecv(_Id, _Where, To, message, Content),
+                     #po_state{ last_sch = LastSch
+                              , last_sch_may_dep = LSMayDep
+                              , last_sch_may_conflict = LSMayConflict
+                              , local_last_sch = LLS
+                              , local_msg_queue = LMQ
+                              } = POState) ->
+                        %% Receive of the message depends on the sending operation
+                        %% Note that for now only message receive is in scope, others (e.g. signals, timeouts) are ignored for now.
+                        MQ = dict_get(To, LMQ),
+                        case dict:is_key(Content, MQ) of
+                            false ->
+                                io:format(user, "??? analyze_partial_order: ~p cannot find in ~p", [Content, dict:to_list(MQ)]);
+                            true ->
+                                ok
+                        end,
+                        Q = dict_get(Content, MQ),
+                        {{value, SendTID}, H1} = queue:out(Q),
+                        %% LastSch may conflict with the last sch in the proc.
+                        LS = dict_get(To, LLS),
+                        POState#po_state{ local_last_sch = dict:store(To, LastSch, LLS)
+                                        , local_msg_queue = dict:store(To, dict:store(Content, H1, MQ), LMQ)
+                                        , last_sch_may_dep =
+                                              case SendTID =:= LastSch of
+                                                  true -> LSMayDep;
+                                                  false -> [SendTID |  LSMayDep]
+                                              end
+                                        , last_sch_may_conflict =
+                                              case LS =:= LastSch of
+                                                  true -> LSMayConflict;
+                                                  false -> [LS | LSMayConflict]
+                                              end
+                                        };
+
+                    (?TraceSend(_, _Where, From, To, _Type, Content, _Effect),
+                     #po_state{ last_sch = LastSch
+                              , last_sch_may_conflict = LSMayConflict
+                              , last_sch_aux_send = LSAuxSend
+                              , local_msg_queue = LMQ
+                              , local_msg_sch = LMS
+                              } = POState) ->
+                        %% Sending message to a process will make it happen after all sending of existing messages
+                        case is_pid(From) of
+                            true ->
+                                MQ = dict_get(To, LMQ),
+                                MS = dict_get(To, LMS),
+                                Q = queue:in(LastSch, dict_get(Content, MQ, queue:new())),
+                                {IsNewSend, LSAuxSend1} =
+                                    case sets:is_element(To, LSAuxSend) of
+                                        true ->
+                                            {false, LSAuxSend};
+                                        false ->
+                                            {true, sets:add_element(LastSch, LSAuxSend)}
+                                    end,
+                                POState#po_state
+                                    { last_sch_aux_send = LSAuxSend1
+                                    , last_sch_may_conflict =
+                                          case IsNewSend of
+                                              true ->
+                                                  MS ++ LSMayConflict;
+                                              false ->
+                                                  LSMayConflict
+                                          end
+                                    , local_msg_queue = dict:store(To, dict:store(Content, Q, MQ), LMQ)
+                                    , local_msg_sch =
+                                          case IsNewSend of
+                                              true ->
+                                                  dict:store(To, [LastSch | MS], LMS);
+                                              false ->
+                                                  LMS
                                           end
                                     };
-                      false ->
-                          %% XXX I do not know how to handle undet message yet ...
-                          %% This is probably wrong, but I will assign a empty clock for now.
-                          To = simplify(ToX, SimpMap),
-                          #{To := IVC} = IBM,
-                          #{To := MQ} = MQM,
-                          VC1 = IVC,
-                          Q = queue:in(VC1, maps:get(Content, MQ, queue:new())),
-                          ProcState#{ inbox_vc_map := IBM#{To := VC1}
-                                    , message_queue_map := MQM#{To := MQ#{Content => Q}}
+                            false ->
+                                %% XXX I do not know how to handle undet message yet ...
+                                %% This is probably wrong, but I will assume a dummy sending tid (which has no dependency) for now
+                                MQ = dict_get(To, LMQ),
+                                Q = queue:in(0, dict_get(Content, MQ, queue:new())),
+                                POState#po_state
+                                    { local_msg_queue = dict:store(To, dict:store(Content, Q, MQ), LMQ)
                                     }
-                  end;
+                        end;
 
-              (_, ProcState) ->
-                  ProcState
-          end,
-          #{ local_vc_map => #{}
-           , inbox_vc_map => #{}
-           , message_queue_map => #{}
-           , message_history_map => #{}
-           , aux_serialization => []
-           , proc_operation_map => #{}
-           , races => []
-           },
-          Tab),
-    POM =
-        maps:fold(
-          fun (Proc, OPList, Acc) ->
-                  Acc#{Proc => lists:foldl(
-                                 fun ({VC, _Info}, InnerAcc) ->
-                                         [VC | InnerAcc]
-                                 end, [], OPList)}
-          end, #{}, POMReversed),
-    Ret0 = #{partial_order_map => POM},
+                    (_, POState) ->
+                        POState
+                end,
+                #po_state
+                { sch_vc = dict:new()
+                , sch_dep_vc = dict:new()
+                , sch_pi = dict:from_list([{0, {undefined, 0}}])
+                , sch_info = dict:from_list([{0, {undefined, undefined}}])
+                , last_sch = 0
+                , last_sch_access = dict:new()
+                , last_sch_dep = []
+                , last_sch_may_dep = []
+                , last_sch_may_conflict = []
+                , last_sch_aux_send = sets:new()
+                , local_last_sch = dict:new()
+                , local_sch_history = dict:new()
+                , local_msg_queue = dict:new()
+                , local_msg_sch = dict:new()
+                , var_write_sch = dict:new()
+                , var_read_sch = dict:new()
+                , conflicts = []
+                },
+                Tab)),
+    SimplifiedSchVC =
+        dict:fold(
+          fun (Sch, VC, Acc) ->
+                  SimplifiedVC =
+                      maps:fold(
+                        fun (IPX, II, IAcc) ->
+                                IP = simplify(IPX, SimpMap),
+                                IAcc#{IP => II}
+                        end, #{}, VC),
+                  dict:store(Sch, SimplifiedVC, Acc)
+          end, dict:new(), SchVC),
+    POH = dict:fold(
+            fun (PX, HX, Acc) ->
+                    P = simplify(PX, SimpMap),
+                    %% will reverse back he order in the process
+                    H = lists:foldl(
+                          fun (Sch, HAcc) ->
+                                  VC = dict_get(Sch, SimplifiedSchVC),
+                                  [VC | HAcc]
+                          end, [], HX),
+                    Acc#{P => H}
+            end, #{}, LSH),
+
+    Ret0 = #{partial_order_history => POH, conflicts => Conflicts},
     Ret1 =
         case FindRaces of
             false ->
                 Ret0;
             true ->
-                {RaceCount, RacingTIDs, RacingLocations} = refine_race_information(_State, Tab, Races),
+                {RaceCount, RacingTIDs, RacingLocations} = refine_race_information(_State, Tab, Conflicts),
                 Ret0#{racing_locations => RacingLocations, racing_tids => RacingTIDs, race_count => RaceCount}
         end,
-    Ret2 =
-        case SimplifyPOTrace of
-            true ->
-                POTrace =
-                    maps:fold(
-                      fun (Proc, OPList, Acc) ->
-                              Acc#{Proc => lists:foldl(
-                                             fun ({VC, {To, Content}}, InnerAcc) ->
-                                                     [{VC, {To, simplify(Content, SimpMap)}} | InnerAcc]
-                                             end, [], OPList)}
-                      end, #{}, POMReversed),
-                Ret1#{simplified_po_trace => simplify_po_trace(POTrace, lists:reverse(AuxSerialization))};
-            false ->
-                Ret1
-        end,
-    {ok, Ret2}.
+    {ok, Ret1}.
 
-simplify_po_trace(POTrace, AuxSerialization) ->
-    {_, InitialInfo} =
-        lists:foldl(
-          fun (Actor, {Index, Acc}) ->
-                  {Index + 1, Acc#{Actor => {Index, 1}}}
-          end, {0, #{}}, lists:usort(AuxSerialization)),
+%% simplify_po_trace(POTrace, AuxSerialization) ->
+%%     {_, InitialInfo} =
+%%         lists:foldl(
+%%           fun (Actor, {Index, Acc}) ->
+%%                   {Index + 1, Acc#{Actor => {Index, 1}}}
+%%           end, {0, #{}}, lists:usort(AuxSerialization)),
+%%     simplify_po_trace(InitialInfo, POTrace, AuxSerialization, []).
 
-    simplify_po_trace(InitialInfo, POTrace, AuxSerialization, []).
+%% simplify_po_trace(_, _, [], Rev) ->
+%%     lists:reverse(Rev);
+%% simplify_po_trace(Info, POTrace, [From | RestSerialization] = _AuxSerialization, Rev) ->
+%%     #{From := {FromI, Counter}} = Info,
+%%     #{From := [{VC, {To, Content}} | Rest]} = POTrace,
+%%     #{To := {ToI, _}} = Info,
+%%     Height = maps:fold(
+%%                fun (Actor, Index, AccHeight) ->
+%%                        #{Actor := {ActorI, _}} = Info,
+%%                        CurHeight = maps:get({ActorI, Index}, Info),
+%%                        max(CurHeight, AccHeight)
+%%                end, 0, VC) + 1,
+%%     simplify_po_trace(Info#{{FromI, Counter} => Height, From := {FromI, Counter + 1}},
+%%                        POTrace#{From := Rest},
+%%                        RestSerialization,
+%%                        [{FromI, Height, ToI, Content} | Rev]).
 
-simplify_po_trace(_, _, [], Rev) ->
-    lists:reverse(Rev);
-simplify_po_trace(Info, POTrace, [From | RestSerialization] = _AuxSerialization, Rev) ->
-    #{From := {FromI, Counter}} = Info,
-    #{From := [{VC, {To, Content}} | Rest]} = POTrace,
-    #{To := {ToI, _}} = Info,
-    Height = maps:fold(
-               fun (Actor, Index, AccHeight) ->
-                       #{Actor := {ActorI, _}} = Info,
-                       CurHeight = maps:get({ActorI, Index}, Info),
-                       max(CurHeight, AccHeight)
-               end, 0, VC) + 1,
-    simplify_po_trace(Info#{{FromI, Counter} => Height, From := {FromI, Counter + 1}},
-                       POTrace#{From := Rest},
-                       RestSerialization,
-                       [{FromI, Height, ToI, Content} | Rev]).
-
-
-merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, #{partial_order_map := POM, simp_map := SimpMap} = FinalData) ->
+merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, #{partial_order_history := POH, simp_map := SimpMap} = FinalData) ->
     %% Thus we can count how many partial orders has been covered.
-    case ets:insert_new(AccTab, {{po_trace, POM}, [IC]}) of
+    case ets:insert_new(AccTab, {{po_trace, POH}, [IC]}) of
         true ->
             case Dump of
                 _ when Dump =:= new; Dump =:= all ->
-                    io:format(user, "New po trace ~p~n", [maps:get(simplified_po_trace, FinalData, POM)]),
+                    io:format(user, "New po trace ~p~n", [maps:get(simplified_po_trace, FinalData, POH)]),
                     dump_trace(State, Tab, SimpMap);
                 _ ->
                     ok
@@ -316,14 +505,14 @@ merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, #{part
         false ->
             case Dump of
                 all ->
-                    io:format(user, "po trace ~p~n", [POM]),
+                    io:format(user, "po trace ~p~n", [POH]),
                     dump_trace(State, Tab, SimpMap);
                 _ ->
                     ok
             end,
-            case ets:lookup(AccTab, {po_trace, POM}) of
+            case ets:lookup(AccTab, {po_trace, POH}) of
                 [{_, ItList}] ->
-                    ets:update_element(AccTab, {po_trace, POM}, [{2, [IC | ItList]}])
+                    ets:update_element(AccTab, {po_trace, POH}, [{2, [IC | ItList]}])
             end
     end,
     ok.
@@ -333,16 +522,19 @@ refine_race_information(_, Tab, Races) ->
         lists:foldl(
           fun ({X, YList}, {N, S}) ->
                   {N + length(YList),
-                   lists:foldl(
-                     fun (Y, Acc) ->
-                             sets:add_element(Y, Acc)
-                     end,
-                     sets:add_element(X, S),
-                     YList)}
+                   case YList of
+                       [] -> S;
+                       _ ->
+                           lists:foldl(
+                             fun (Y, Acc) ->
+                                     sets:add_element(Y, Acc)
+                             end,
+                             sets:add_element(X, S), YList)
+                   end}
           end, {0, sets:new()}, Races),
     Locations =
         ets:foldl(
-          fun (?TraceSend(TID, Where, _, _, _, _, _), Acc) ->
+          fun (?TraceSchedule(TID, Where, _, _), Acc) ->
                   case sets:is_element(TID, TIDs) of
                       true ->
                           sets:add_element(Where, Acc);
@@ -360,13 +552,13 @@ refine_race_information(_, Tab, Races) ->
 path_traverse(TraceEntry, #{simp_map := SimpMap} = AnalysesData, AccTab, PathState, #{allow_create_new_nodes := AllowCreate, debug := Debug}) ->
     case TraceEntry of
         ?TraceNewProcess(_, Proc, _AbsId, _Creator, EntryInfo) ->
-            [{root, Root}] = ets:lookup(AccTab, root),
+            [{path_root, Root}] = ets:lookup(AccTab, path_root),
             Branch = {new, simplify(Proc, SimpMap), simplify(EntryInfo, SimpMap)},
-            case ets:lookup(AccTab, {Root, Branch}) of
+            case ets:lookup(AccTab, {path_branch, Root, Branch}) of
                 [] when AllowCreate ->
                     case Debug of
                         true ->
-                            AvailableBranch = ets:match(AccTab, {{Root, '$1'}, '_'}),
+                            AvailableBranch = ets:match(AccTab, {{path_branch, Root, '$1'}, '_'}),
                             io:format(user,
                                       "New branch ~p at ~p~n"
                                       "  available: ~p~n",
@@ -374,20 +566,24 @@ path_traverse(TraceEntry, #{simp_map := SimpMap} = AnalysesData, AccTab, PathSta
                         false ->
                             ok
                     end,
-                    NewNode = ets:update_counter(AccTab, node_counter, 1),
-                    ets:insert(AccTab, {{Root, Branch}, NewNode}),
+                    NewNode = ets:update_counter(AccTab, path_node_counter, 1),
+                    ets:insert(AccTab, {{path_branch, Root, Branch}, NewNode}),
+                    ets:update_counter(AccTab, {path_branch_counter, Root}, 1),
+                    ets:insert(AccTab, {{path_branch_counter, NewNode}, 0}),
+                    ets:insert(AccTab, {{path_hit_counter, NewNode}, 1}),
                     PathState#{Proc => {NewNode, true}};
                 [{_, Next}] ->
+                    ets:update_counter(AccTab, {path_hit_counter, Next}, 1),
                     PathState#{Proc => {Next, false}}
             end;
-         ?TraceSend(TID, Where, From, To, Type, Content, _Effect) ->
-            case maps:is_key(From, PathState) of
+        ?TraceSchedule(TID, Where, Proc, Info) ->
+            case maps:is_key(Proc, PathState) of
                 true ->
-                    #{From := {StateNode, _}} = PathState,
-                    SimpContent = simplify(Content, SimpMap),
-                    Branch = {send, Where, simplify(To, SimpMap), Type, SimpContent},
-                    {NextState0, NextNode} =
-                        case ets:lookup(AccTab, {StateNode, Branch}) of
+                    #{Proc := {StateNode, InNewBranch}} = PathState,
+                    SimpInfo = simplify(Info, SimpMap),
+                    Branch = {schedule, Where, simplify(Proc, SimpMap), SimpInfo},
+                    {NextState0, IsNew, NextNode} =
+                        case ets:lookup(AccTab, {path_branch, StateNode, Branch}) of
                             [] when AllowCreate ->
                                 case Debug of
                                     true ->
@@ -397,44 +593,61 @@ path_traverse(TraceEntry, #{simp_map := SimpMap} = AnalysesData, AccTab, PathSta
                                                   "  available: ~p~n",
                                                   [Branch, StateNode, AvailableBranch]);
                                     false ->
-                                        ok
+                                        io:format(user,
+                                                  "New branch ~p at ~p~n",
+                                                  [Branch, StateNode])
                                 end,
-                                NewNode = ets:update_counter(AccTab, node_counter, 1),
-                                ets:insert(AccTab, {{StateNode, Branch}, NewNode}),
-                                {PathState#{From := {NewNode, true}}, NewNode};
+                                NewNode = ets:update_counter(AccTab, path_node_counter, 1),
+                                ets:insert(AccTab, {{path_branch, StateNode, Branch}, NewNode}),
+                                BC = ets:update_counter(AccTab, {path_branch_counter, StateNode}, 1),
+                                ets:insert(AccTab, {{path_branch_counter, NewNode}, 0}),
+                                ets:insert(AccTab, {{path_hit_counter, NewNode}, 1}),
+                                {PathState#{Proc := {NewNode, InNewBranch orelse BC > 1}}, true, NewNode};
                             [{_, Next}] ->
-                                {PathState#{From := {Next, false}}, Next}
+                                ets:update_counter(AccTab, {path_hit_counter, Next}, 1),
+                                {PathState#{Proc := {Next, InNewBranch}}, false, Next}
                         end,
                     NextState = NextState0#{total_op => 1 + maps:get(total_op, NextState0, 0)},
-                    case maps:is_key(racing_tids, AnalysesData) andalso
-                        sets:is_element(TID, maps:get(racing_tids, AnalysesData)) of
+                    case maps:is_key(racing_tids, AnalysesData) of
                         true ->
-                            case ets:insert_new(AccTab, {{racing_path_flag, NextNode}, 1}) of
+                            IsRacing = sets:is_element(TID, maps:get(racing_tids, AnalysesData)),
+                            HasFlag = ets:lookup(AccTab, {racing_path_flag, NextNode}) =/= [],
+                            case IsRacing of
                                 true ->
-                                    NextState#{ racing_op => 1 + maps:get(racing_op, PathState, 0)
-                                              , racing_fn => 1 + maps:get(racing_fn, PathState, 0)};
+                                    case HasFlag of
+                                        true ->
+                                            ets:update_counter(AccTab, {racing_path_flag, NextNode}, 1);
+                                        false ->
+                                            ets:insert_new(AccTab, {{racing_path_flag, NextNode}, 1})
+                                    end,
+                                    case IsNew orelse HasFlag of
+                                        true ->
+                                            NextState#{racing_op => 1 + maps:get(racing_op, PathState, 0)};
+                                        false ->
+                                            NextState#{ racing_op => 1 + maps:get(racing_op, PathState, 0)
+                                                      , racing_fn => 1 + maps:get(racing_fn, PathState, 0)}
+                                    end;
                                 false ->
-                                    ets:update_counter(AccTab, {racing_path_flag, NextNode}, 1),
-                                    NextState#{racing_op => 1 + maps:get(racing_op, PathState, 0)}
+                                    case IsNew or HasFlag of
+                                        true ->
+                                            NextState#{racing_fp => 1 + maps:get(racing_fp, PathState, 0)};
+                                        false ->
+                                            NextState
+                                    end
                             end;
                         false ->
-                            case ets:lookup(AccTab, {racing_path_flag, NextNode}) of
-                                [] ->
-                                    NextState;
-                                _ ->
-                                    NextState#{racing_fp => 1 + maps:get(racing_fp, PathState, 0)}
-                            end
+                            NextState
                     end;
                 false ->
                     PathState
             end;
-        ?TraceRecv(_, Where, To, Type, Content) ->
-            case maps:is_key(To, PathState) of
+        ?TraceSend(_, Where, From, To, Type, Content, _Effect) ->
+            case maps:is_key(From, PathState) of
                 true ->
-                    #{To := {StateNode, _}} = PathState,
+                    #{From := {StateNode, InNewBranch}} = PathState,
                     SimpContent = simplify(Content, SimpMap),
-                    Branch = {recv, Where, Type, SimpContent},
-                    case ets:lookup(AccTab, {StateNode, Branch}) of
+                    Branch = {send, Where, simplify(To, SimpMap), Type, SimpContent},
+                    case ets:lookup(AccTab, {path_branch, StateNode, Branch}) of
                         [] when AllowCreate ->
                             case Debug of
                                 true ->
@@ -446,11 +659,46 @@ path_traverse(TraceEntry, #{simp_map := SimpMap} = AnalysesData, AccTab, PathSta
                                 false ->
                                     ok
                             end,
-                            NewNode = ets:update_counter(AccTab, node_counter, 1),
-                            ets:insert(AccTab, {{StateNode, Branch}, NewNode}),
-                            PathState#{To := {NewNode, true}};
+                            NewNode = ets:update_counter(AccTab, path_node_counter, 1),
+                            ets:insert(AccTab, {{path_branch, StateNode, Branch}, NewNode}),
+                            BC = ets:update_counter(AccTab, {path_branch_counter, StateNode}, 1),
+                            ets:insert(AccTab, {{path_branch_counter, NewNode}, 0}),
+                            ets:insert(AccTab, {{path_hit_counter, NewNode}, 1}),
+                            PathState#{From := {NewNode, InNewBranch orelse BC > 1}};
                         [{_, Next}] ->
-                            PathState#{To := {Next, false}}
+                            ets:update_counter(AccTab, {path_hit_counter, Next}, 1),
+                            PathState#{From := {Next, InNewBranch}}
+                    end;
+                false ->
+                    PathState
+            end;
+        ?TraceRecv(_, Where, To, Type, Content) ->
+            case maps:is_key(To, PathState) of
+                true ->
+                    #{To := {StateNode, InNewBranch}} = PathState,
+                    SimpContent = simplify(Content, SimpMap),
+                    Branch = {recv, Where, Type, SimpContent},
+                    case ets:lookup(AccTab, {path_branch, StateNode, Branch}) of
+                        [] when AllowCreate ->
+                            case Debug of
+                                true ->
+                                    AvailableBranch = ets:match(AccTab, {{StateNode, '$1'}, '_'}),
+                                    io:format(user,
+                                              "New branch ~p at ~p~n"
+                                              "  available: ~p~n",
+                                              [Branch, StateNode, AvailableBranch]);
+                                false ->
+                                    ok
+                            end,
+                            NewNode = ets:update_counter(AccTab, path_node_counter, 1),
+                            ets:insert(AccTab, {{path_branch, StateNode, Branch}, NewNode}),
+                            BC = ets:update_counter(AccTab, {path_branch_counter, StateNode}, 1),
+                            ets:insert(AccTab, {{path_branch_counter, NewNode}, 0}),
+                            ets:insert(AccTab, {{path_hit_counter, NewNode}, 1}),
+                            PathState#{To := {NewNode, InNewBranch orelse BC > 1}};
+                        [{_, Next}] ->
+                            ets:update_counter(AccTab, {path_hit_counter, Next}, 1),
+                            PathState#{To := {Next, InNewBranch}}
                     end;
                 false ->
                     PathState
@@ -463,21 +711,36 @@ path_traverse(TraceEntry, #{simp_map := SimpMap} = AnalysesData, AccTab, PathSta
 path_prediction_traverse(TraceEntry, SHT, AccTab, PathState) ->
     case TraceEntry of
         ?TraceNewProcess(_, Proc, _AbsId, _Creator, EntryInfo) ->
-            [{root, Root}] = ets:lookup(AccTab, root),
+            [{path_root, Root}] = ets:lookup(AccTab, path_root),
             Branch = {new, simplify_sht(Proc, SHT), simplify_sht(EntryInfo, SHT)},
-            case ets:lookup(AccTab, {Root, Branch}) of
+            case ets:lookup(AccTab, {path_branch, Root, Branch}) of
                 [] ->
                     maps:remove(Proc, PathState);
                 [{_, Next}] ->
                     PathState#{Proc => Next}
             end;
-         ?TraceSend(_, Where, From, To, Type, Content, _Effect) ->
+        ?TraceSchedule(_, Where, Proc, Info) ->
+            case maps:is_key(Proc, PathState) of
+                true ->
+                    #{Proc := StateNode} = PathState,
+                    SimpInfo = simplify_sht(Info, SHT),
+                    Branch = {schedule, Where, simplify_sht(Proc, SHT), SimpInfo},
+                    case ets:lookup(AccTab, {path_branch, StateNode, Branch}) of
+                        [] ->
+                            maps:remove(Proc, PathState);
+                        [{_, Next}] ->
+                            PathState#{Proc := Next}
+                    end;
+                false ->
+                    PathState
+            end;
+        ?TraceSend(_, Where, From, To, Type, Content, _Effect) ->
             case maps:is_key(From, PathState) of
                 true ->
                     #{From := StateNode} = PathState,
                     SimpContent = simplify_sht(Content, SHT),
                     Branch = {send, Where, simplify_sht(To, SHT), Type, SimpContent},
-                    case ets:lookup(AccTab, {StateNode, Branch}) of
+                    case ets:lookup(AccTab, {path_branch, StateNode, Branch}) of
                         [] ->
                             maps:remove(From, PathState);
                         [{_, Next}] ->
@@ -492,7 +755,7 @@ path_prediction_traverse(TraceEntry, SHT, AccTab, PathState) ->
                     #{To := StateNode} = PathState,
                     SimpContent = simplify_sht(Content, SHT),
                     Branch = {recv, Where, Type, SimpContent},
-                    case ets:lookup(AccTab, {StateNode, Branch}) of
+                    case ets:lookup(AccTab, {path_branch, StateNode, Branch}) of
                         [] ->
                             maps:remove(To, PathState);
                         [{_, Next}] ->
@@ -545,20 +808,20 @@ merge_line_coverage(#state{extra_opts = ExtraOpts}, Tab, AccTab, #{simp_map := S
                           ets:update_counter(AccTab, {line_coverage, Where}, 1)
                   end,
                   Acc;
-              (?TraceSend(TID, Where, From, _To, _Type, _Content, _Effect), Acc) ->
+              (?TraceSchedule(TID, Where, Proc, _Info), Acc) ->
                   case ets:insert_new(AccTab, {{line_coverage, Where}, 1}) of
                       true ->
                           ets:update_counter(AccTab, line_coverage_counter, 1);
                       false ->
                           ets:update_counter(AccTab, {line_coverage, Where}, 1)
                   end,
-                  case is_pid(From) of
+                  case is_pid(Proc) of
                       true ->
-                          P = simplify(From, SimpMap),
+                          P = simplify(Proc, SimpMap),
                           case maps:is_key(racing_tids, AnalysesData) andalso
                               sets:is_element(TID, maps:get(racing_tids, AnalysesData)) of
                               true ->
-                                  Acc1 = 
+                                  Acc1 =
                                       case ets:insert_new(AccTab, {{racing_loc, Where}, 1}) of
                                           true ->
                                               Acc#{racing_fn => 1 + maps:get(racing_fn, Acc, 0)};
@@ -591,6 +854,14 @@ merge_line_coverage(#state{extra_opts = ExtraOpts}, Tab, AccTab, #{simp_map := S
                       false ->
                           Acc
                   end;
+              (?TraceSend(_, Where, _From, _To, _Type, _Content, _Effect), Acc) ->
+                  case ets:insert_new(AccTab, {{line_coverage, Where}, 1}) of
+                      true ->
+                          ets:update_counter(AccTab, line_coverage_counter, 1);
+                      false ->
+                          ets:update_counter(AccTab, {line_coverage, Where}, 1)
+                  end,
+                  Acc;
               (?TraceRecv(_, Where, _To, _Type, _Content), Acc) ->
                   case ets:insert_new(AccTab, {{line_coverage, Where}, 1}) of
                       true ->
@@ -650,7 +921,11 @@ dump_trace(#state{dump_traces_verbose = Verbose} = _State, Tab, SimpMap) ->
         false ->
             TraceRev =
                 ets:foldl(
-                  fun (?TraceSend(_, _Where, FromX, ToX, _Type, ContentX, _Effect), Acc) ->
+                  fun (?TraceSchedule(_, _Where, ProcX, InfoX), Acc) ->
+                          Proc = simplify(ProcX, SimpMap),
+                          Info = simplify(InfoX, SimpMap),
+                          [ {schedule, Proc, Info} | Acc ];
+                      (?TraceSend(_, _Where, FromX, ToX, _Type, ContentX, _Effect), Acc) ->
                           From = simplify(FromX, SimpMap),
                           To = simplify(ToX, SimpMap),
                           Content = simplify(ContentX, SimpMap),
@@ -716,6 +991,14 @@ simplify(Data, SimpMap) when is_reference(Data) ->
 simplify(Data, _SimpMap) when is_function(Data) ->
     %% Function? Ignore for now...
     {function};
+simplify(Data, _SimpMap) when is_atom(Data) ->
+    case atom_to_list(Data) of
+        [ $$, $M, $$ | Rest ] ->
+            list_to_atom(lists:dropwhile(fun ($$) -> false; (_) -> true end, Rest));
+        [ $$, $E, $$ | Rest ] ->
+            list_to_atom(lists:dropwhile(fun ($$) -> false; (_) -> true end, Rest));
+        _ -> Data
+    end;
 simplify(Data, _SimpMap) ->
     Data.
 
@@ -752,21 +1035,28 @@ simplify_sht(Data, SimpSHT) when is_reference(Data) ->
 simplify_sht(Data, _SimpSHT) when is_function(Data) ->
     %% Function? Ignore for now...
     {function};
+simplify_sht(Data, _SimpSHT) when is_atom(Data) ->
+    case atom_to_list(Data) of
+        [ $$, $M, $$ | Rest ] ->
+            list_to_atom(lists:dropwhile(fun ($$) -> false; (_) -> true end, Rest));
+        [ $$, $E, $$ | Rest ] ->
+            list_to_atom(lists:dropwhile(fun ($$) -> false; (_) -> true end, Rest));
+        _ -> Data
+    end;
 simplify_sht(Data, _SimpSHT) ->
     Data.
-
 
 %% For a accumulated table, calculate the path tree fanout function
 %%   f(d) := how many path node are at the depth d
 %% Returns {MaxDepth, f}, where f has key from [0, MaxDepth]
 calc_acc_fanout(AccTab) ->
-    [{root, Root}] = ets:lookup(AccTab, root),
+    [{path_root, Root}] = ets:lookup(AccTab, path_root),
     ChildrenMap =
         ets:foldl(
-          fun ({{From, _}, To}, Acc) when is_integer(From), is_integer(To) ->
+          fun ({{path_branch, From, _}, To}, Acc) when is_integer(From), is_integer(To) ->
                   Acc#{From => [To | maps:get(From, Acc, [])]};
               %% Dirty hack for Acc in the last version ...
-              ({{{root, From}, _}, To}, Acc) when is_integer(From), is_integer(To) ->
+              ({{{path_root, From}, _}, To}, Acc) when is_integer(From), is_integer(To) ->
                   Acc#{From => [To | maps:get(From, Acc, [])]};
               (_, Acc) ->
                   Acc
@@ -854,7 +1144,7 @@ handle_call({finalize, TraceInfo, SHT},
                   , line_coverage = LC
                   , state_coverage = SC
                   , extra_handlers = ExtraHandlers
-                  , extra_opts = _ExtraOpts
+                  , extra_opts = ExtraOpts
                   }
             = State)
   when Tab =/= undefined, AccTab =/= undefined ->
@@ -875,7 +1165,8 @@ handle_call({finalize, TraceInfo, SHT},
         true ->
             merge_path_coverage(State, Tab, AccTab, R1),
             [{path_coverage_counter, PathCoverageCount}] = ets:lookup(AccTab, path_coverage_counter),
-            io:format(user, "path coverage count = ~p~n", [PathCoverageCount]);
+            [{path_node_counter, PathNodeCount}] = ets:lookup(AccTab, path_node_counter),
+            io:format(user, "path coverage count = ~w, ~w~n", [PathCoverageCount, PathNodeCount]);
         false ->
             ok
     end,
@@ -908,7 +1199,16 @@ handle_call({finalize, TraceInfo, SHT},
                fun ({HandlerMod, HandlerState}, AccR) ->
                        HandlerMod:handle_trace(HandlerState, Tab, AccR)
                end, R1, ExtraHandlers),
+    case maps:get(verbose_finalize_data, ExtraOpts, false) of
+        true -> io:format(user, "Tracer finalize data: ~p~n", [RFinal]);
+        false -> ok
+    end,
     {reply, RFinal, State};
+handle_call({add_trace, {schedule, Where, Proc, Info}}, _From, #state{tab = Tab} = State) when Tab =/= undefined ->
+    TC = ets:update_counter(Tab, trace_counter, 1),
+    Event = ?TraceSchedule(TC, Where, Proc, Info),
+    ets:insert(Tab, Event),
+    {reply, ok, maybe_update_prediction_state(State, Event)};
 handle_call({add_trace, {call, From, Where, Req}}, _From, #state{tab = Tab} = State) when Tab =/= undefined ->
     TC = ets:update_counter(Tab, trace_counter, 1),
     Event = ?TraceCall(TC, From, Where, Req),
@@ -929,21 +1229,31 @@ handle_call({add_trace, {recv, Where, To, Type, Content}}, _From, #state{tab = T
     Event = ?TraceRecv(TC, Where, To, Type, Content),
     ets:insert(Tab, Event),
     {reply, ok, maybe_update_prediction_state(State, Event)};
+handle_call({add_trace, {read, Var}}, _From, #state{tab = Tab} = State) when Tab =/= undefined ->
+    TC = ets:update_counter(Tab, trace_counter, 1),
+    Event = ?TraceRead(TC, Var),
+    ets:insert(Tab, Event),
+    {reply, ok, maybe_update_prediction_state(State, Event)};
+handle_call({add_trace, {write, Var}}, _From, #state{tab = Tab} = State) when Tab =/= undefined ->
+    TC = ets:update_counter(Tab, trace_counter, 1),
+    Event = ?TraceWrite(TC, Var),
+    ets:insert(Tab, Event),
+    {reply, ok, maybe_update_prediction_state(State, Event)};
 handle_call({add_trace, {report_state, TraceInfo, RState}}, _From, #state{tab = Tab} = State) when Tab =/= undefined ->
     TC = ets:update_counter(Tab, trace_counter, 1),
     Event = ?TraceReportState(TC, TraceInfo, RState),
     ets:insert(Tab, Event),
     {reply, ok, maybe_update_prediction_state(State, Event)};
-handle_call({predict_racing, Where, From, To, Content} = Req, _From, #state{sht = SHT, pred_state = PredState, acc_tab = AccTab} = State) ->
-    {Reply, Hit} = 
+handle_call({predict_racing, Where, Proc, Info} = Req, _From, #state{sht = SHT, pred_state = PredState, acc_tab = AccTab} = State) ->
+    {Reply, Hit} =
         case State#state.to_predict of
             false ->
                 {true, false};
             true ->
-                case maps:is_key(From, PredState) of
+                case maps:is_key(Proc, PredState) of
                     true ->
-                        Branch = {send, Where, simplify_sht(To, SHT), message, simplify_sht(Content, SHT)},
-                        case ets:lookup(AccTab, {maps:get(From, PredState), Branch}) of
+                        Branch = {schedule, Where, simplify_sht(Proc, SHT), simplify_sht(Info, SHT)},
+                        case ets:lookup(AccTab, {path_branch, maps:get(Proc, PredState), Branch}) of
                             [] ->
                                 {true, false};
                             [{_, EventId}] ->
@@ -958,7 +1268,7 @@ handle_call({predict_racing, Where, From, To, Content} = Req, _From, #state{sht 
                         {true, false}
                 end
         end,
-    io:format(user, "Tracer ~p => ~w (hit: ~w)~n", [Req, Reply, Hit]), 
+    io:format(user, "Tracer ~p => ~w (hit: ~w)~n", [Req, Reply, Hit]),
     {reply, Reply, State};
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.

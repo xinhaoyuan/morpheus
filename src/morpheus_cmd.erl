@@ -123,8 +123,117 @@ main(["aggregate-po-filter" | Args]) ->
               undefined
       end, undefined, Result),
     ok;
+main(["visualize-path-info" | AccFilenames]) ->
+    {Data, AccTabList} = aggregate_path_info(AccFilenames),
+    io:format("digraph G {~n", []),
+    Stat =
+        dict:fold(
+          fun ({covered_by, Node}, CoveredList, #{node_counter := NC} = Acc) ->
+                  RacingFlags =
+                      lists:foldr(
+                        fun ({Index, TabNode}, IAcc) ->
+                                case [] =/= ets:lookup(lists:nth(Index, AccTabList), {racing_path_flag, TabNode}) of
+                                    true ->
+                                        [Index | IAcc];
+                                    false ->
+                                        IAcc
+                                end
+                        end, [], CoveredList),
+                  ExtraStyles =
+                      case length(RacingFlags) of
+                          1 ->
+                              "style = filled, color = red";
+                          _ ->
+                              case length(CoveredList) =:= 1 of
+                                  true ->
+                                      "style = filled, color = yellow";
+                                  false when RacingFlags =:= [] ->
+                                      "";
+                                  false ->
+                                      "style = filled, color = green"
+                              end
+                      end,
+                  io:format("  ~w [ shape = box, label = <Racing: ~w<br/>Covered: ~w>, ~s]~n",
+                            [ Node
+                            , RacingFlags
+                            , [ {II, case ets:lookup(lists:nth(II, AccTabList), {path_hit_counter, IN}) of [{_, HC}] -> HC end} || {II, IN} <- CoveredList]
+                            , ExtraStyles
+                            ]),
+                  Acc#{node_counter := NC + 1};
+              ({branch, From, Info}, To, #{edge_counter := EC} = Acc) ->
+                  Label = lists:foldr(
+                            fun ($", S) ->
+                                    [$\\, $" | S];
+                                ($\n, S) ->
+                                    [$\\, $l | S];
+                                (C, S) ->
+                                    [C | S]
+                            end, [], lists:flatten(io_lib:fwrite("~p", [Info]))),
+                  io:format(" ~w -> ~w [label=\"~s\"];~n", [From, To, Label]),
+                  Acc#{edge_counter := EC + 1};
+              (_, _, Acc) ->
+                  Acc
+          end, #{node_counter => 1, edge_counter => 1}, Data),
+    io:format("}~n"
+              "/* nodes: ~w */~n"
+              "/* edges: ~w */~n",
+              [maps:get(node_counter, Stat), maps:get(edge_counter, Stat)]),
+    ok;
 main(Args) ->
     io:format(standard_error, "Badarg: ~p~n", [Args]).
+
+aggregate_path_info(AccFilenames) ->
+    aggregate_path_info(AccFilenames, 1, {dict:from_list([{root, 0}, {node_counter, 1}, {{path_rev, 0}, []}]), []}).
+
+aggregate_path_info([], _, {Data, AccTabs}) ->
+    {Data, lists:reverse(AccTabs)};
+aggregate_path_info([AccFilename | Other], Index, {Data, AccTabs}) ->
+    {ok, AccTab} = ets:file2tab(AccFilename, [{verify, true}]),
+    [{path_root, Root}] = ets:lookup(AccTab, path_root),
+    {ok, DataRoot} = dict:find(root, Data),
+    NewData = aggregate_path_info([{Root, DataRoot}], Index, AccTab, Data),
+    aggregate_path_info(Other, Index + 1, {NewData, [AccTab | AccTabs]}).
+
+aggregate_path_info([], _Index, _AccTab, Data) -> Data;
+aggregate_path_info([{Head, DataHead} | Tail], Index, AccTab, Data) ->
+    Data1 = dict:store({covered_by, DataHead},
+                       case dict:find({covered_by, DataHead}, Data) of
+                           error -> [{Index, Head}];
+                           {ok, OldCoveredBy} -> [{Index, Head} | OldCoveredBy]
+                       end,
+                       Data),
+    PathRev = dict:fetch({path_rev, DataHead}, Data),
+    {NewData, NewStack} =
+        lists:foldl(
+          fun ([Info, To], {CurData, CurStack}) ->
+                  case dict:find({branch, DataHead, Info}, CurData) of
+                      {ok, ToData} ->
+                          {CurData, [{To, ToData} | CurStack]};
+                      error ->
+                          {ok, ToData} = dict:find(node_counter, CurData),
+                          CurData1 = dict:store(node_counter, ToData + 1, CurData),
+                          CurData2 = dict:store({branch, DataHead, Info}, ToData, CurData1),
+                          CurData3 = dict:store({path_rev, ToData}, [Info | PathRev], CurData2),
+                          {CurData3, [{To, ToData} | CurStack]}
+                  end
+          end, {Data1, Tail}, ets:match(AccTab, {{path_branch, Head, '$1'}, '$2'})),
+    aggregate_path_info(NewStack, Index, AccTab, NewData).
+
+%% traverse_path_info(Root, AccTab) ->
+%%     traverse_path_info([Root], {[], []}, AccTab).
+
+%% traverse_path_info([], Acc, _) -> Acc;
+%% traverse_path_info([Head | Tail], {Nodes, Edges}, AccTab) ->
+%%     ThisNode =
+%%         #{ id => Head
+%%          , racing_flag => [] =/= ets:lookup(AccTab, {racing_path_flag, Head})
+%%          },
+%%     {NewStack, NewEdges} =
+%%         lists:foldl(
+%%           fun ([Info, To], {CurStack, CurEdges}) ->
+%%                   {[To | CurStack], [{Head, To, Info} | CurEdges]}
+%%           end, {Tail, Edges}, ets:match(AccTab, {{Head, '$1'}, '$2'})),
+%%     traverse_path_info(NewStack, {[ThisNode | Nodes], NewEdges}, AccTab).
 
 aggregate_states_acc_files(Filenames) ->
     aggregate_states_acc_files(Filenames, {1, #{}}).

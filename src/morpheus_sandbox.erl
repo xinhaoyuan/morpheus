@@ -67,6 +67,7 @@
         , trace_receive         :: boolean()
         , trace_send            :: boolean()
         , only_schedule_send    :: boolean()
+        , use_prediction        :: boolean()
         , control_timeouts      :: boolean()
         , time_uncertainty      :: integer()
         , stop_on_deadlock      :: boolean()
@@ -330,6 +331,7 @@ ctl_init(Opts) ->
           , trace_receive         = proplists:get_value(trace_receive, Opts, false)
           , trace_send            = proplists:get_value(trace_send, Opts, false)
           , only_schedule_send    = proplists:get_value(only_schedule_send, Opts, false)
+          , use_prediction        = proplists:get_value(use_prediction, Opts, false)
           , control_timeouts      = proplists:get_value(control_timeouts, Opts, true)
           , time_uncertainty      = proplists:get_value(time_uncertainty, Opts, 0)
           , stop_on_deadlock      = proplists:get_value(stop_on_deadlock, Opts, true)
@@ -500,6 +502,25 @@ ctl_loop(S0) ->
                     ctl_loop(ctl_loop_call(S, Where, ToTrace, Pid, Ref, Req))
             end;
         #fd_delay_resp{ref = Ref} ->
+            {SAfterPop, Where, ReplyTo, Ref, Req} = ctl_pop_request_from_buffer(S, Ref),
+            case ToTrace of
+                true -> ?INFO("schedule resp ~p", [Req]);
+                false -> ok
+            end,
+            case S#sandbox_state.opt#sandbox_opt.tracer_pid of
+                undefined ->
+                    ok;
+                T ->
+                    ?T:trace_schedule(T, Where, ReplyTo, Req)
+            end,
+            case ReplyTo of
+                timeout ->
+                    ctl_loop(ctl_handle_cast(SAfterPop, Req));
+                _ ->
+                    ctl_loop(ctl_loop_call(SAfterPop, Where, ToTrace, ReplyTo, Ref, Req))
+            end;
+        {handle_buffer, Ref} ->
+            %% almost like above, but without tracer call
             {SAfterPop, Where, ReplyTo, Ref, Req} = ctl_pop_request_from_buffer(S, Ref),
             case ToTrace of
                 true -> ?INFO("resume resp ~p", [Req]);
@@ -701,16 +722,22 @@ ctl_check_and_receive(#sandbox_state{opt = Opt,
                                       end,
                                       ToSchedule =
                                           Sched =/= undefined
-                                          andalso not maybe_skip_only_send(S, DelayReq, OriginReq)
+                                          andalso not maybe_skip_only_send(S, OriginReq)
                                           andalso ctl_call_to_delay(
                                                     Aux =:= undefined orelse
                                                     not erlang:function_exported(Aux, ?MORPHEUS_CB_TO_DELAY_CALL_FN, 5),
                                                     OriginReq),
                                       case ToSchedule of
                                           true ->
-                                              {ctl_push_request_to_scheduler(CurS, DelayReq), AID, ToNotify};
+                                              case predict_to_skip(S, DelayReq, OriginReq) of
+                                                  true ->
+                                                      self() ! #fd_delay_resp{ref = DelayReq#fd_delay_req.ref},
+                                                      {CurS, AID, false};
+                                                  false ->
+                                                      {ctl_push_request_to_scheduler(CurS, DelayReq), AID, ToNotify}
+                                              end;
                                           false ->
-                                              self() ! #fd_delay_resp{ref = DelayReq#fd_delay_req.ref},
+                                              self() ! {handle_buffer, DelayReq#fd_delay_req.ref},
                                               {CurS, AID, false}
                                       end
                               end,
@@ -773,13 +800,16 @@ ctl_call_can_buffer({undet}) -> false;
 %% {undet, _} is delayable since we need to buffer it
 ctl_call_can_buffer(_) -> true.
 
-maybe_skip_only_send(#sandbox_state{opt = #sandbox_opt{only_schedule_send = true}}, _, ?cci_send_msg(_, _, _)) -> false;
-maybe_skip_only_send(#sandbox_state{opt = #sandbox_opt{only_schedule_send = only_racing, tracer_pid = TP}},
-                     DelayReq, ?cci_send_msg(From, To, Msg)) when TP =/= undefined ->
-    #fd_delay_req{data = #{where := Where}} = DelayReq,
-    not ?T:predict_racing(TP, Where, From, To, Msg);
-maybe_skip_only_send(_, _, _) ->
-    true.
+maybe_skip_only_send(#sandbox_state{opt = #sandbox_opt{only_schedule_send = true}}, ?cci_send_msg(_, _, _)) -> false;
+maybe_skip_only_send(#sandbox_state{opt = #sandbox_opt{only_schedule_send = true}}, _) -> true;
+maybe_skip_only_send(_, _) ->
+    false.
+
+predict_to_skip(#sandbox_state{opt = #sandbox_opt{use_prediction = true, tracer_pid = TP}}, DelayReq, Req) when TP =/= undefined ->
+    #fd_delay_req{data = #{where := Where, from := From}} = DelayReq,
+    not ?T:predict_racing(TP, Where, From, Req);
+predict_to_skip(_, _, _) ->
+    false.
 
 ctl_call_to_delay(true, {nodelay, _}) -> false;
 ctl_call_to_delay(true, ?cci_undet()) -> false;
@@ -1116,8 +1146,15 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
                       (_, Acc) -> Acc
                   end, []),
     {S, NameList};
-ctl_handle_call(#sandbox_state{proc_table = PT} = S,
+ctl_handle_call(#sandbox_state{proc_table = PT, opt = #sandbox_opt{tracer_pid = TPid}} = S,
                 _Where, ?cci_process_link(PA, PB)) ->
+    case TPid of
+        undefined -> ok;
+        _ ->
+            ?T:trace_read(TPid, {proc_alive, PB}),
+            ?T:trace_write(TPid, {link, PA, PB}),
+            ?T:trace_write(TPid, {link, PB, PA})
+    end,
     case {?TABLE_GET(PT, {linking, PA}), ?TABLE_GET(PT, {linking, PB})} of
         {{_, LA}, {_, LB}} ->
             case PA =/= PB andalso ?TABLE_GET(PT, {link, PA, PB}) of
@@ -1162,8 +1199,15 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
                     {S, noproc}
             end
     end;
-ctl_handle_call(#sandbox_state{proc_table = PT} = S,
+ctl_handle_call(#sandbox_state{proc_table = PT, opt = #sandbox_opt{tracer_pid = TPid}} = S,
                 _Where, ?cci_process_unlink(PA, PB)) ->
+    case TPid of
+        undefined -> false;
+        _ ->
+            ?T:trace_read(TPid, {proc_alive, PB}),
+            ?T:trace_write(TPid, {link, PA, PB}),
+            ?T:trace_write(TPid, {link, PB, PA})
+    end,
     case PA =/= PB andalso ?TABLE_GET(PT, {link, PA, PB}) of
         false ->
             {S, true};
@@ -1207,10 +1251,22 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
     end;
 ctl_handle_call(S, _Where, ?cci_process_monitor(Watcher, [], Target)) ->
     ctl_monitor_proc(S, Watcher, Target, Target);
-ctl_handle_call(#sandbox_state{proc_table = PT} = S,
+ctl_handle_call(#sandbox_state{proc_table = PT, opt = #sandbox_opt{tracer_pid = TPid}} = S,
                 _Where, ?cci_process_demonitor(Proc, Ref, Opts)) ->
+    case TPid of
+        undefined ->
+            ok;
+        _ ->
+            ?T:trace_write(TPid, {monitor, Ref})
+    end,
     case ?TABLE_GET(PT, {monitor, Ref}) of
         {_, {Watcher, Target, _Object}} ->
+            case TPid of
+                undefined ->
+                    ok;
+                _ ->
+                    ?T:trace_read(TPid, {proc_alive, Target})
+            end,
             {{_, MList}, {_, WList}} =
                 {?TABLE_GET(PT, {watching, Watcher}), ?TABLE_GET(PT, {monitored_by, Target})},
             PT0 = ?TABLE_REMOVE(PT, {monitor, Ref}),
@@ -1262,14 +1318,29 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             ?WARNING("process_set_trap_exit on external process", []),
             {S, noproc}
     end;
-ctl_handle_call(#sandbox_state{proc_table = PT} = S,
+ctl_handle_call(#sandbox_state{proc_table = PT, opt = #sandbox_opt{tracer_pid = TPid}} = S,
                 _Where, ?cci_register_process(Node, Name, Proc)) ->
+    case TPid of
+        undefined -> ok;
+        _ ->
+            ?T:trace_read(TPid, {proc_alive, Proc})
+    end,
     case ?TABLE_GET(PT, {name, Proc}) of
         {_, {Node, []}} ->
             case ?TABLE_GET(PT, {reg, Node, Name}) of
                 {_, _} ->
+                    case TPid of
+                        undefined -> ok;
+                        _ ->
+                            ?T:trace_read(TPid, {name2proc, Node, Name})
+                    end,
                     {S, badarg};
                 undefined ->
+                    case TPid of
+                        undefined -> ok;
+                        _ ->
+                            ?T:trace_write(TPid, {name2proc, Node, Name})
+                    end,
                     PT0 = ?TABLE_SET(PT, {reg, Node, Name}, {proc, Proc}),
                     PT1 = ?TABLE_SET(PT0, {name, Proc}, {Node, Name}),
                     {S#sandbox_state{proc_table = PT1}, true}
@@ -1294,8 +1365,13 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
             PT1 = ?TABLE_SET(PT0, {external_proc, Proc}, {Node, Name}),
             {S#sandbox_state{proc_table = PT1}, true}
     end;
-ctl_handle_call(#sandbox_state{proc_table = PT} = S,
+ctl_handle_call(#sandbox_state{proc_table = PT, opt = #sandbox_opt{tracer_pid = TPid}} = S,
                 _Where, ?cci_unregister(Node, Name)) ->
+    case TPid of
+        undefined -> ok;
+        _ ->
+            ?T:trace_write(TPid, {name2proc, Node, Name})
+    end,
     case ?TABLE_GET(PT, {reg, Node, Name}) of
         {_, {proc, Proc}} ->
             PT0 = case ?TABLE_GET(PT, {name, Proc}) of
@@ -1310,7 +1386,7 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
         undefined ->
             {S, badarg}
     end;
-ctl_handle_call(#sandbox_state{proc_table = PT} = S,
+ctl_handle_call(#sandbox_state{proc_table = PT, opt = #sandbox_opt{tracer_pid = TPid}} = S,
                 _Where, ?cci_whereis(FromNode, Node, Name)) ->
     Node0 =
         case FromNode of
@@ -1324,6 +1400,11 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
                     _ -> []
                 end
         end,
+    case Node0 =/= [] andalso TPid =/= undefined of
+        true ->
+            ?T:trace_read(TPid, {name2proc, Node0, Name});
+        false -> ok
+    end,
     case ?TABLE_GET(PT, {reg, Node0, Name}) of
         {_, R} ->
             {S, R};
@@ -1359,7 +1440,7 @@ ctl_handle_call(#sandbox_state{ opt = Opt
                 not_found ->
                     case Timeout of
                         0 ->
-                            ctl_trace_receive(Opt, SHT, Where, Proc, timeout, undefined), 
+                            ctl_trace_receive(Opt, SHT, Where, Proc, timeout, undefined),
                             Proc ! {self(), Ref, timeout},
                             {S, Ref};
                         infinity ->
@@ -1392,7 +1473,7 @@ ctl_handle_call(#sandbox_state{ opt = Opt
                                                 S
                                         end,
                                     PT1 = ?TABLE_SET(PT, {receive_status, Proc}, {Ref, Where, PatFun0, Deadline}),
-                                    {S1#sandbox_state{proc_table = PT1, 
+                                    {S1#sandbox_state{proc_table = PT1,
                                                       alive = S#sandbox_state.alive -- [Proc], alive_counter = AC - 1,
                                                       timeouts_counter = TimeoutsC + 1}, Ref}
                             end
@@ -1400,7 +1481,7 @@ ctl_handle_call(#sandbox_state{ opt = Opt
                 {found, Pos} ->
                     {M, NewMsgQueue} = ?H:take_nth(Pos, MsgQueue),
                     PT1 = ?TABLE_SET(PT, {msg_queue, Proc}, NewMsgQueue),
-                    ctl_trace_receive(Opt, SHT, Where, Proc, message, M), 
+                    ctl_trace_receive(Opt, SHT, Where, Proc, message, M),
                     Proc ! {self(), Ref, [message | M]},
                     {S#sandbox_state{proc_table = PT1}, Ref}
             end;
@@ -1505,8 +1586,14 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
         _ ->
             {S, true}
     end;
-ctl_handle_call(#sandbox_state{proc_table = PT} = S,
+ctl_handle_call(#sandbox_state{proc_table = PT, opt = #sandbox_opt{tracer_pid = TPid}} = S,
                 _Where, ?cci_process_on_exit(Proc, Reason)) ->
+    case TPid of
+        undefined ->
+            ok;
+        _ ->
+            ?T:trace_write(TPid, {proc_alive, Proc})
+    end,
     case ?TABLE_GET(PT, {proc, Proc}) of
         {_, {alive, _Props}} ->
             unlink(Proc),
@@ -1528,15 +1615,32 @@ ctl_handle_call(#sandbox_state{proc_table = PT} = S,
                                undefined ->
                                    PT1;
                                _ ->
+                                   case TPid of
+                                       undefined -> ok;
+                                       _ ->
+                                           ?T:trace_write(TPid, {name2proc, Node, Name})
+                                   end,
                                    ?TABLE_REMOVE(PT1, {reg, Node, Name})
                            end,
             PT2 = lists:foldl(fun ({Ref, Target}, CurPT) ->
                                       {_, TML} = ?TABLE_GET(CurPT, {monitored_by, Target}),
+                                      case TPid of
+                                          undefined ->
+                                              ok;
+                                          _ ->
+                                              ?T:trace_write(TPid, {monitor, Ref})
+                                      end,
                                       ?TABLE_SET(?TABLE_REMOVE(CurPT, {monitor, Ref}), {monitored_by, Target}, lists:keydelete(Ref, 1, TML))
                               end, ?TABLE_REMOVE(PTAfterBasic, {watching, Proc}), WList),
             {PTAfterMonitor, NotifyWatcherList} =
                 lists:foldl(fun ({Ref, Watcher, Object}, {CurPT, L}) ->
                                     {_, TML} = ?TABLE_GET(CurPT, {watching, Watcher}),
+                                    case TPid of
+                                        undefined ->
+                                            ok;
+                                        _ ->
+                                            ?T:trace_write(TPid, {monitor, Ref})
+                                    end,
                                     NextPT = ?TABLE_SET(?TABLE_REMOVE(CurPT, {monitor, Ref}), {watching, Watcher}, lists:keydelete(Ref, 1, TML)),
                                     {NextPT, [{Ref, Watcher, Object} | L]}
                             end, {?TABLE_REMOVE(PT2, {monitored_by, Proc}), []}, MList),
@@ -1735,8 +1839,14 @@ ctl_process_ets_on_exit(#sandbox_state{proc_shtable = ShTab} = S, Proc) ->
                   end, HandledList),
     S1.
 
-ctl_monitor_proc(#sandbox_state{proc_table = PT, proc_shtable = SHT} = S,
+ctl_monitor_proc(#sandbox_state{proc_table = PT, proc_shtable = SHT, opt = #sandbox_opt{tracer_pid = TPid}} = S,
                  Watcher, {Name, Node}, Object) ->
+    case TPid of
+        undefined ->
+            ok;
+        _ ->
+            ?T:trace_read(TPid, {name2proc, Node, Name})
+    end,
     case ?TABLE_GET(PT, {reg, Node, Name}) of
         {_, {proc, Target}} ->
             ctl_monitor_proc(S, Watcher, Target, Object);
@@ -1747,11 +1857,23 @@ ctl_monitor_proc(#sandbox_state{proc_table = PT, proc_shtable = SHT} = S,
             {S0, ok} = ctl_process_send(S, undefined, system, Watcher, {'DOWN', Ref, process, Object, noproc}),
             {S0, Ref}
     end;
-ctl_monitor_proc(#sandbox_state{proc_table = PT, proc_shtable = SHT} = S,
+ctl_monitor_proc(#sandbox_state{proc_table = PT, proc_shtable = SHT, opt = #sandbox_opt{tracer_pid = TPid}} = S,
                  Watcher, Target, Object) ->
+    case TPid of
+        undefined ->
+            ok;
+        _ ->
+            ?T:trace_read(TPid, {proc_alive, Target})
+    end,
     case {?TABLE_GET(PT, {watching, Watcher}), ?TABLE_GET(PT, {monitored_by, Target})} of
         {{_, MList}, {_, WList}} ->
             Ref = make_registered_ref(Watcher, SHT),
+            case TPid of
+                undefined ->
+                    ok;
+                _ ->
+                    ?T:trace_write(TPid, {monitor, Ref})
+            end,
             PT0 =
                 ?TABLE_SET(?TABLE_SET(PT, {watching, Watcher}, [{Ref, Target} | MList]),
                            {monitored_by, Target}, [{Ref, Watcher, Object} | WList]),
@@ -1790,7 +1912,8 @@ ctl_handle_cast( #sandbox_state{ opt = Opt
                                , proc_shtable = SHT
                                , alive_counter = AC
                                , timeouts_counter = TimeoutsC
-                               , vclock = Clock} = S
+                               , vclock = Clock
+                               } = S
                , {receive_timeout, Proc, Ref}) ->
     case ?TABLE_GET(PT, {receive_status, Proc}) of
         {_, {Ref, Where, _PatFun, Timeout}} ->
@@ -3137,7 +3260,7 @@ handle_io(F, A, _Aux) ->
         [standard_io | R] ->
             apply(io, F, [user | R]);
         [IODev | _] when is_pid(IODev); is_atom(IODev) ->
-            %% XXX this condition is very problematic! since format can also be an atom ...  
+            %% XXX this condition is very problematic! since format can also be an atom ...
             apply(io, F, A);
         _ ->
             apply(io, F, [user | A])
@@ -3186,7 +3309,7 @@ real_tid(TRef) ->
 handle_ets(F, A, {_Old, _New, Ann}) ->
     case F of
         all ->
-            %% call_ctl(get_ctl(), Ann, {global_op, [{ets_all, get_node()}], []}), 
+            %% call_ctl(get_ctl(), Ann, {global_op, [{ets_all, get_node()}], []}),
             {ok, Ret} = ?cc_ets_all(get_ctl(), Ann),
             lists:map(fun (Name) ->
                         if
@@ -3305,12 +3428,12 @@ handle_ets(F, A, {_Old, _New, Ann}) ->
 
 encode_ets_name(Name) ->
     %% XXX this is ugly!
-    Prefix = "$E$" ++ pid_to_list(get_ctl()) ++ "$" ++ atom_to_list(get_node()) ++ "$",
+    Prefix = "$E$" ++ pid_to_list(get_ctl()) ++ "!" ++ atom_to_list(get_node()) ++ "$",
     list_to_atom(Prefix ++ atom_to_list(Name)).
 
 decode_ets_name(Name) ->
     %% XXX this is ugly!
-    Prefix = "$E$" ++ pid_to_list(get_ctl()) ++ "$" ++ atom_to_list(get_node()) ++ "$",
+    Prefix = "$E$" ++ pid_to_list(get_ctl()) ++ "!" ++ atom_to_list(get_node()) ++ "$",
     list_to_atom(atom_to_list(Name) -- Prefix).
 
 start_node(Node, M, F, A) ->
