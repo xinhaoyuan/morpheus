@@ -278,7 +278,6 @@ analyze_partial_order(#state{find_races = FindRaces} = _State, Tab, SimpMap) ->
                                                    undefined ->
                                                        [Pre];
                                                    _ ->
-                                                       %% maybe redundant, but it is fine
                                                        [Pre, LastBarrier]
                                                end
                                          , last_sch_may_dep = []
