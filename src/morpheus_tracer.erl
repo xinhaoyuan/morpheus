@@ -44,7 +44,6 @@
         , dump_traces_verbose     :: boolean()
         , dump_po_traces          :: new | all | false
         , find_races              :: boolean()
-        , simplify_po_trace       :: boolean()
         , po_coverage             :: boolean()
         , path_coverage           :: boolean()
         , line_coverage           :: boolean()
@@ -240,7 +239,7 @@ handle_last_sch(#po_state{ sch_vc = SchVC
         , conflicts = [{LastSch, SchConflicts} | Conflicts]
         }.
 
-analyze_partial_order(#state{find_races = FindRaces, simplify_po_trace = _SimplifyPOTrace} = _State, Tab, SimpMap) ->
+analyze_partial_order(#state{find_races = FindRaces} = _State, Tab, SimpMap) ->
     #po_state
         { sch_vc = SchVC
         , local_sch_history = LSH
@@ -279,6 +278,7 @@ analyze_partial_order(#state{find_races = FindRaces, simplify_po_trace = _Simpli
                                                    undefined ->
                                                        [Pre];
                                                    _ ->
+                                                       %% maybe redundant, but it is fine
                                                        [Pre, LastBarrier]
                                                end
                                          , last_sch_may_dep = []
@@ -1124,7 +1124,6 @@ init(Args) ->
     DumpTracesVerbose = proplists:get_value(dump_traces_verbose, Args, false),
     DumpPOTraces = proplists:get_value(dump_po_traces, Args, false),
     FindRaces = proplists:get_value(find_races, Args, false),
-    SimplifyPOTrace = proplists:get_value(simplify_po_trace, Args, false),
     POCoverage = proplists:get_value(po_coverage, Args, false),
     PathCoverage = proplists:get_value(path_coverage, Args, false),
     LineCoverage = proplists:get_value(line_coverage, Args, false),
@@ -1154,7 +1153,6 @@ init(Args) ->
                   , dump_traces_verbose = DumpTracesVerbose
                   , dump_po_traces = DumpPOTraces
                   , find_races = FindRaces
-                  , simplify_po_trace = SimplifyPOTrace
                   , po_coverage = POCoverage
                   , path_coverage = PathCoverage
                   , line_coverage = LineCoverage
@@ -1316,8 +1314,8 @@ maybe_dump_trace(#state{dump_traces = true} = State, Tab, #{simp_map := SimpMap}
 maybe_dump_trace(_, _, _) ->
     ok.
 
-maybe_extract_partial_order_info(#state{find_races = FindRaces, po_coverage = POC, simplify_po_trace = SimplifyPOTrace} = State, Tab, #{simp_map := SimpMap} = FinalData) ->
-    case FindRaces or POC or SimplifyPOTrace of
+maybe_extract_partial_order_info(#state{find_races = FindRaces, po_coverage = POC} = State, Tab, #{simp_map := SimpMap} = FinalData) ->
+    case FindRaces or POC of
         true ->
             case (catch analyze_partial_order(State, Tab, SimpMap)) of
                 {ok, R} ->
