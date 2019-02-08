@@ -139,7 +139,7 @@ create_acc_ets_tab() ->
     Tab.
 
 open_or_create_acc_ets_tab(Filename) ->
-    morpheus_helper:open_or_create_ets(
+    ?H:open_or_create_ets(
       Filename,
       fun (_Reason) ->
               create_acc_ets_tab()
