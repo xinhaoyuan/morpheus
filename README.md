@@ -22,7 +22,7 @@ All usage of Morpheus starts with the call
 ```erlang
 morpheus_sandbox:start(module(), atom(), [term()], [option()]) -> pid() | {pid(), reference()}
 ```
-which takes the entry function of the sandbox and startup options, and returns the pid of the controller process (with a monitor link if the `monitor` option is proveided).
+which takes the entry function of the sandbox and startup options, and returns the pid of the controller process (with a monitor ref if the `monitor` option is proveided).
 
 After the sandbox is started, host usually waits for the sandbox to end with some result, which is passed using the exit reason of the controller process.
 
