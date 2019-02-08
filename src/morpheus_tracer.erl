@@ -13,6 +13,7 @@
         , trace_receive/5
         , trace_read/2
         , trace_write/2
+        , trace_barrier/1
         , trace_report_state/3
         , finalize/3
         , create_ets_tab/0
@@ -64,6 +65,7 @@
         , last_sch_may_dep      :: [integer()]
         , last_sch_may_conflict :: [integer()]
         , last_sch_aux_send     :: sets:set(pid())
+        , last_barrier          :: undefined | integer()
         , local_last_sch        :: dict:dict(pid(), integer())
         , local_sch_history     :: dict:dict(pid(), [integer()])
         , local_msg_queue       :: dict:dict(pid(), dict:dict(term(), queue:queue(integer())))
@@ -109,6 +111,9 @@ trace_read(T, Var) ->
 
 trace_write(T, Var) ->
     gen_server:call(T, {add_trace, {write, Var}}, infinity).
+
+trace_barrier(T) ->
+    gen_server:call(T, {add_trace, {barrier}}, infinity).
 
 trace_report_state(T, TraceInfo, State) ->
     gen_server:call(T, {add_trace, {report_state, TraceInfo, State}}, infinity).
@@ -259,6 +264,7 @@ analyze_partial_order(#state{find_races = FindRaces, simplify_po_trace = _Simpli
                      POState) ->
                         #po_state{ sch_pi = SchPI
                                  , sch_info = SchInfo
+                                 , last_barrier = LastBarrier
                                  , local_sch_history = LSH
                                  , local_last_sch = LLS
                                  } = POState1 = handle_last_sch(POState),
@@ -268,7 +274,13 @@ analyze_partial_order(#state{find_races = FindRaces, simplify_po_trace = _Simpli
                                          , sch_info = dict:store(TID, {Proc, Content}, SchInfo)
                                          , last_sch = TID
                                          , last_sch_access = dict:new()
-                                         , last_sch_dep = [Pre]
+                                         , last_sch_dep =
+                                               case LastBarrier of
+                                                   undefined ->
+                                                       [Pre];
+                                                   _ ->
+                                                       [Pre, LastBarrier]
+                                               end
                                          , last_sch_may_dep = []
                                          , last_sch_may_conflict = []
                                          , last_sch_aux_send = sets:new()
@@ -276,7 +288,27 @@ analyze_partial_order(#state{find_races = FindRaces, simplify_po_trace = _Simpli
                                          , local_sch_history = dict:store(Proc, [TID | SH], LSH)
                                          };
 
-                    (?TraceWrite(_Id, Var),
+                    (?TraceBarrier(TID), POState) ->
+                        #po_state{ sch_pi = SchPI
+                                 , last_barrier = LastBarrier
+                                 , local_last_sch = LLS
+                                 } = POState1 = handle_last_sch(POState),
+                        POState1#po_state{ sch_pi = dict:store(TID, {undefined, 0}, SchPI)
+                                         , last_sch = TID
+                                         , last_sch_access = dict:new()
+                                         , last_sch_dep =
+                                               dict:fold(
+                                                 fun (_, V, Acc) ->
+                                                   [V | Acc]
+                                                 end,
+                                                 case LastBarrier of undefined -> []; _ -> [LastBarrier] end,
+                                                 LLS)
+                                         , last_sch_may_dep = []
+                                         , last_sch_may_conflict = []
+                                         , last_sch_aux_send = sets:new()
+                                         };
+
+                    (?TraceWrite(_, Var),
                      #po_state{ last_sch = LastSch
                               , last_sch_access = LSAccess
                               , last_sch_may_conflict = LSMayConflict
@@ -301,7 +333,7 @@ analyze_partial_order(#state{find_races = FindRaces, simplify_po_trace = _Simpli
                                     }
                         end;
 
-                    (?TraceRead(_Id, Var),
+                    (?TraceRead(_, Var),
                      #po_state{ last_sch = LastSch
                               , last_sch_access = LSAccess
                               , last_sch_may_conflict = LSMayConflict
@@ -422,6 +454,7 @@ analyze_partial_order(#state{find_races = FindRaces, simplify_po_trace = _Simpli
                 , last_sch_may_dep = []
                 , last_sch_may_conflict = []
                 , last_sch_aux_send = sets:new()
+                , last_barrier = undefined
                 , local_last_sch = dict:new()
                 , local_sch_history = dict:new()
                 , local_msg_queue = dict:new()
@@ -1237,6 +1270,11 @@ handle_call({add_trace, {read, Var}}, _From, #state{tab = Tab} = State) when Tab
 handle_call({add_trace, {write, Var}}, _From, #state{tab = Tab} = State) when Tab =/= undefined ->
     TC = ets:update_counter(Tab, trace_counter, 1),
     Event = ?TraceWrite(TC, Var),
+    ets:insert(Tab, Event),
+    {reply, ok, maybe_update_prediction_state(State, Event)};
+handle_call({add_trace, {barrier}}, _From, #state{tab = Tab} = State) when Tab =/= undefined ->
+    TC = ets:update_counter(Tab, trace_counter, 1),
+    Event = ?TraceBarrier(TC),
     ets:insert(Tab, Event),
     {reply, ok, maybe_update_prediction_state(State, Event)};
 handle_call({add_trace, {report_state, TraceInfo, RState}}, _From, #state{tab = Tab} = State) when Tab =/= undefined ->

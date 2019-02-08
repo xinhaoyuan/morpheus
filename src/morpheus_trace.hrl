@@ -5,4 +5,5 @@
 -define(TraceRecv(TS, Where, To, Type, Content), {TS, recv, {Where, To, Type, Content}}).
 -define(TraceRead(TS, Var), {TS, read, {Var}}).
 -define(TraceWrite(TS, Var), {TS, write, {Var}}).
+-define(TraceBarrier(TS), {TS, barrier}).
 -define(TraceReportState(TS, TraceInfo, State), {TS, report_state, TraceInfo, State}).

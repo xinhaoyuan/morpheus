@@ -1935,12 +1935,19 @@ ctl_handle_cast( #sandbox_state{ opt = Opt
             %% nothing needs done as the matched receive is already passed
             S
     end;
-ctl_handle_cast( #sandbox_state{ opt = #sandbox_opt{ time_uncertainty = TUC }
+ctl_handle_cast( #sandbox_state{ opt = #sandbox_opt{ time_uncertainty = TUC
+                                                   , tracer_pid = TPid }
                                , proc_table = PT
                                , abs_id_table = AIDT
                                , vclock = Clock
                                , timeouts = TO} = S
                , {kick_timeouts}) ->
+    case TPid of
+        undefined ->
+            ok;
+        _ ->
+            ?T:trace_barrier(TPid)
+    end,
     case TO of
         [] ->
             ?WARNING("kicking empty timeouts?", []),
