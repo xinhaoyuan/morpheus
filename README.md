@@ -21,7 +21,7 @@ We use the term `host` to refer the program running outside of the sandbox and `
 
 All usage of Morpheus starts with the call
 ```erlang
-morpheus:start(module(), atom(), [term()], [option()]) -> pid() | {pid(), reference()}
+morpheus_sandbox:start(module(), atom(), [term()], [option()]) -> pid() | {pid(), reference()}
 ```
 which takes the entry function of the sandbox and startup options, and returns the pid of the controller process (with a monitor link if the `monitor` option is proveided).
 
@@ -30,7 +30,7 @@ After the sandbox is started, host usually waits for the sandbox to end with som
 Below is the typical host side code for a morpheus-based test, which asserts that the test in the sandbox exits with the `success` atom.
 
 ```erlang
-{_, MRef} = morpheus:start(?MODULE, sandbox_entry, [], [monitor, ...]),
+{_, MRef} = morpheus_sandbox:start(?MODULE, sandbox_entry, [], [monitor, ...]),
 success = receive {'DOWN', MRef, _, _, Reason} -> Reason end
 ```
 
