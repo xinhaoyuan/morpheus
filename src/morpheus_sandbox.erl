@@ -510,8 +510,10 @@ ctl_loop(S0) ->
             case S#sandbox_state.opt#sandbox_opt.tracer_pid of
                 undefined ->
                     ok;
-                T ->
-                    ?T:trace_schedule(T, Where, ReplyTo, Req)
+                T when is_pid(ReplyTo) ->
+                    ?T:trace_schedule(T, Where, ReplyTo, Req);
+                _ ->
+                    ok
             end,
             case ReplyTo of
                 timeout ->
@@ -2010,6 +2012,8 @@ ctl_sync_msg_with_undet(Proc, PrevUndetCount, Msg) ->
           fun ({Ctl, _, _}, Acc) when Ctl =:= self() ->
                   Acc;
               ({Ctl, _}, Acc) when Ctl =:= self() ->
+                  Acc;
+              ({'ETS-TRANSFER', _, From, _}, Acc) when From =:= self() ->
                   Acc;
               (UndetMsg, {0, L}) ->
                   {0, [UndetMsg | L]};

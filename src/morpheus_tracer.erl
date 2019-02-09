@@ -549,7 +549,7 @@ merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, #{part
     end,
     ok.
 
-refine_race_information(_, Tab, Races) ->
+refine_race_information(#state{extra_opts = ExtraOpts}, Tab, Races) ->
     {NRaces, TIDs} =
         lists:foldl(
           fun ({X, YList}, {N, S}) ->
@@ -577,6 +577,15 @@ refine_race_information(_, Tab, Races) ->
               (_, Acc) ->
                   Acc
           end, sets:new(), Tab),
+    case maps:get(verbose_race_info, ExtraOpts, false) of
+        true ->
+            io:format(user,
+                      "# of races: ~w~n"
+                      "racing locations: ~p~n",
+                      [NRaces, sets:to_list(Locations)]);
+        false ->
+            ok
+    end,
     {NRaces, TIDs, sets:to_list(Locations)}.
 
 %% ==== Path Coverage ====
