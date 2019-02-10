@@ -38,6 +38,7 @@
         , acc_filename            :: string()
         , acc_tab                 :: ets:tid()
         , to_predict              :: boolean()
+        , predict_by              :: atom()
         , pred_state              :: term()
         , acc_fork_period         :: integer()
         , dump_traces             :: boolean()
@@ -859,6 +860,12 @@ merge_line_coverage(#state{extra_opts = ExtraOpts}, Tab, AccTab, #{simp_map := S
                   case is_pid(Proc) of
                       true ->
                           P = simplify(Proc, SimpMap),
+                          case ets:insert_new(AccTab, {{proc_line_coverage, P, Where}, 1}) of
+                              true ->
+                                  ok;
+                              false ->
+                                  ets:update_counter(AccTab, {proc_line_coverage, P, Where}, 1)
+                          end,
                           case maps:is_key(racing_tids, AnalysesData) andalso
                               sets:is_element(TID, maps:get(racing_tids, AnalysesData)) of
                               true ->
@@ -870,11 +877,11 @@ merge_line_coverage(#state{extra_opts = ExtraOpts}, Tab, AccTab, #{simp_map := S
                                               ets:update_counter(AccTab, {racing_loc, Where}, 1),
                                               Acc
                                       end,
-                                  case ets:insert_new(AccTab, {{racing_proc_loc, {P, Where}}, 1}) of
+                                  case ets:insert_new(AccTab, {{racing_proc_loc, P, Where}, 1}) of
                                       true ->
                                           Acc1#{pl_racing_fn => 1 + maps:get(pl_racing_fn, Acc, 0)};
                                       false ->
-                                          ets:update_counter(AccTab, {racing_proc_loc, {P, Where}}, 1),
+                                          ets:update_counter(AccTab, {racing_proc_loc, P, Where}, 1),
                                           Acc1
                                   end;
                               false ->
@@ -1128,6 +1135,7 @@ init(Args) ->
     AccFilename = proplists:get_value(acc_filename, Args, undefined),
     AccForkPeriod = proplists:get_value(acc_fork_period, Args, 0),
     ToPredict = proplists:get_value(to_predict, Args, false),
+    PredictBy = proplists:get_value(predict_by, Args, undefined),
     DumpTraces = proplists:get_value(dump_traces, Args, false),
     DumpTracesVerbose = proplists:get_value(dump_traces_verbose, Args, false),
     DumpPOTraces = proplists:get_value(dump_po_traces, Args, false),
@@ -1150,6 +1158,7 @@ init(Args) ->
                   , acc_tab = AccTab
                   , acc_fork_period = AccForkPeriod
                   , to_predict = ToPredict
+                  , predict_by = PredictBy
                   , pred_state =
                         case ToPredict of
                             true ->
@@ -1290,10 +1299,10 @@ handle_call({add_trace, {report_state, TraceInfo, RState}}, _From, #state{tab = 
     {reply, ok, maybe_update_prediction_state(State, Event)};
 handle_call({predict_racing, Where, Proc, Info} = Req, _From, #state{sht = SHT, pred_state = PredState, acc_tab = AccTab} = State) ->
     {Reply, Hit} =
-        case State#state.to_predict of
+        case State#state.to_predict andalso State#state.predict_by of
             false ->
                 {true, false};
-            true ->
+            path ->
                 case maps:is_key(Proc, PredState) of
                     true ->
                         Branch = {schedule, Where, simplify_sht(Proc, SHT), simplify_sht(Info, SHT)},
@@ -1310,6 +1319,23 @@ handle_call({predict_racing, Where, Proc, Info} = Req, _From, #state{sht = SHT, 
                         end;
                     false ->
                         {true, false}
+                end;
+            ploc ->
+                P = simplify_sht(Proc, SHT),
+                case ets:lookup(AccTab, {racing_proc_loc, P, Where}) of
+                    [] -> case ets:lookup(AccTab, {proc_line_coverage, P, Where}) of
+                             [] -> {true, false};
+                             _ -> {false, true}
+                          end;
+                    _ -> {true, true}
+                end;
+            loc ->
+                case ets:lookup(AccTab, {racing_loc, Where}) of
+                    [] -> case ets:lookup(AccTab, {line_coverage, Where}) of
+                              [] -> {true, false};
+                              _ -> {false, true}
+                          end;
+                    _ -> {true, true}
                 end
         end,
     io:format(user, "Tracer ~p => ~w (hit: ~w)~n", [Req, Reply, Hit]),
@@ -1345,7 +1371,7 @@ maybe_extract_partial_order_info(#state{find_races = FindRaces, po_coverage = PO
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-maybe_update_prediction_state(#state{to_predict = true, sht = SHT, pred_state = PredState, acc_tab = AccTab, po_coverage = true, path_coverage = true, find_races = true} = State, Trace) ->
+maybe_update_prediction_state(#state{to_predict = true, predict_by = path, sht = SHT, pred_state = PredState, acc_tab = AccTab, po_coverage = true, path_coverage = true, find_races = true} = State, Trace) ->
     PredState1 = path_prediction_traverse(Trace, SHT, AccTab, PredState),
     State#state{pred_state = PredState1};
 maybe_update_prediction_state(State, _) ->
