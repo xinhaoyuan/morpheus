@@ -892,7 +892,7 @@ merge_line_coverage(#state{extra_opts = ExtraOpts}, Tab, AccTab, #{simp_map := S
                                           _ ->
                                               Acc#{racing_fp => 1 + maps:get(racing_fp, Acc, 0)}
                                       end,
-                                  case ets:lookup(AccTab, {racing_proc_loc, {P, Where}}) of
+                                  case ets:lookup(AccTab, {racing_proc_loc, P, Where}) of
                                       [] ->
                                           Acc1;
                                       _ ->
@@ -1301,6 +1301,8 @@ handle_call({predict_racing, Where, Proc, Info} = Req, _From, #state{sht = SHT, 
     {Reply, Hit} =
         case State#state.to_predict andalso State#state.predict_by of
             false ->
+                {true, false};
+            undefined ->
                 {true, false};
             path ->
                 case maps:is_key(Proc, PredState) of
