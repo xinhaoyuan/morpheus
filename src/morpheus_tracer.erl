@@ -1177,6 +1177,7 @@ init(Args) ->
                   , extra_handlers = ExtraHandlers
                   , extra_opts = ExtraOpts
                   },
+    io:format(user, "??? ~p~n", [State]),
     {ok, State}.
 
 handle_call({set_sht, SHT}, _From, State) ->
@@ -1373,7 +1374,7 @@ maybe_extract_partial_order_info(#state{find_races = FindRaces, po_coverage = PO
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-maybe_update_prediction_state(#state{to_predict = true, predict_by = path, sht = SHT, pred_state = PredState, acc_tab = AccTab, po_coverage = true, path_coverage = true, find_races = true} = State, Trace) ->
+maybe_update_prediction_state(#state{to_predict = true, predict_by = path, sht = SHT, pred_state = PredState, acc_tab = AccTab} = State, Trace) ->
     PredState1 = path_prediction_traverse(Trace, SHT, AccTab, PredState),
     State#state{pred_state = PredState1};
 maybe_update_prediction_state(State, _) ->
