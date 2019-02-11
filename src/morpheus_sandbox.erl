@@ -68,6 +68,7 @@
         , trace_send            :: boolean()
         , only_schedule_send    :: boolean()
         , use_prediction        :: boolean()
+        , prediction_weight     :: integer()
         , control_timeouts      :: boolean()
         , time_uncertainty      :: integer()
         , stop_on_deadlock      :: boolean()
@@ -332,6 +333,7 @@ ctl_init(Opts) ->
           , trace_send            = proplists:get_value(trace_send, Opts, false)
           , only_schedule_send    = proplists:get_value(only_schedule_send, Opts, false)
           , use_prediction        = proplists:get_value(use_prediction, Opts, false)
+          , prediction_weight     = proplists:get_value(prediction_weight, Opts, 3)
           , control_timeouts      = proplists:get_value(control_timeouts, Opts, true)
           , time_uncertainty      = proplists:get_value(time_uncertainty, Opts, 0)
           , stop_on_deadlock      = proplists:get_value(stop_on_deadlock, Opts, true)
@@ -731,13 +733,15 @@ ctl_check_and_receive(#sandbox_state{opt = Opt,
                                                     OriginReq),
                                       case ToSchedule of
                                           true ->
-                                              case predict_to_skip(S, DelayReq, OriginReq) of
-                                                  true ->
-                                                      self() ! #fd_delay_resp{ref = DelayReq#fd_delay_req.ref},
-                                                      {CurS, AID, false};
-                                                  false ->
-                                                      {ctl_push_request_to_scheduler(CurS, DelayReq), AID, ToNotify}
-                                              end;
+                                              %% case predict_to_skip(S, DelayReq, OriginReq) of
+                                              %%     true ->
+                                              %%         self() ! #fd_delay_resp{ref = DelayReq#fd_delay_req.ref},
+                                              %%         {CurS, AID, false};
+                                              %%     false ->
+                                              %%         {ctl_push_request_to_scheduler(CurS, DelayReq), AID, ToNotify}
+                                              %% end;
+                                              DelayReqP = maybe_with_prediction(S, DelayReq, OriginReq),
+                                              {ctl_push_request_to_scheduler(CurS, DelayReqP), AID, ToNotify};
                                           false ->
                                               self() ! {handle_buffer, DelayReq#fd_delay_req.ref},
                                               {CurS, AID, false}
@@ -807,11 +811,26 @@ maybe_skip_only_send(#sandbox_state{opt = #sandbox_opt{only_schedule_send = true
 maybe_skip_only_send(_, _) ->
     false.
 
-predict_to_skip(#sandbox_state{opt = #sandbox_opt{use_prediction = true, tracer_pid = TP}}, DelayReq, Req) when TP =/= undefined ->
-    #fd_delay_req{data = #{where := Where, from := From}} = DelayReq,
-    not ?T:predict_racing(TP, Where, From, Req);
-predict_to_skip(_, _, _) ->
-    false.
+%% predict_to_skip(#sandbox_state{opt = #sandbox_opt{use_prediction = true, tracer_pid = TP}}, DelayReq, Req) when TP =/= undefined ->
+%%     #fd_delay_req{data = #{where := Where, from := From}} = DelayReq,
+%%     not ?T:predict_racing(TP, Where, From, Req);
+%% predict_to_skip(_, _, _) ->
+%%     false.
+
+maybe_with_prediction(#sandbox_state{opt = #sandbox_opt{ use_prediction = true
+                                                       , prediction_weight = PW
+                                                       , tracer_pid = TP}},
+                      DelayReq, Req) when TP =/= undefined ->
+    #fd_delay_req{data = #{where := Where, from := From} = Data} = DelayReq,
+    case ?T:predict_racing(TP, Where, From, Req) of
+        true ->
+            DelayReq#fd_delay_req{data = Data#{weight => PW}};
+        false ->
+            DelayReq
+    end;
+maybe_with_prediction(_, DelayReq, _) ->
+    DelayReq.
+
 
 ctl_call_to_delay(true, {nodelay, _}) -> false;
 ctl_call_to_delay(true, ?cci_undet()) -> false;
