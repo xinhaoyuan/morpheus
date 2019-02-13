@@ -43,7 +43,6 @@
         , acc_fork_period         :: integer()
         , dump_traces             :: boolean()
         , dump_traces_verbose     :: boolean()
-        , dump_po_traces          :: new | all | false
         , find_races              :: boolean()
         , po_coverage             :: boolean()
         , path_coverage           :: boolean()
@@ -523,23 +522,23 @@ analyze_partial_order(#state{find_races = FindRaces} = _State, Tab, SimpMap) ->
 %%                        RestSerialization,
 %%                        [{FromI, Height, ToI, Content} | Rev]).
 
-merge_po_coverage(#state{dump_po_traces = Dump} = State, Tab, IC, AccTab, #{partial_order_history := POH, simp_map := SimpMap} = FinalData) ->
+merge_po_coverage(#state{extra_opts = ExtraOpts} = State, Tab, IC, AccTab, #{partial_order_history := POH} = FinalData) ->
     %% Thus we can count how many partial orders has been covered.
     case ets:insert_new(AccTab, {{po_trace, POH}, [IC]}) of
         true ->
-            case Dump of
-                _ when Dump =:= new; Dump =:= all ->
+            case maps:get(dump_po_traces, ExtraOpts, undefined) of
+                new ->
                     io:format(user, "New po trace ~p~n", [maps:get(simplified_po_trace, FinalData, POH)]),
-                    dump_trace(State, Tab, SimpMap);
+                    dump_trace(State, AccTab, Tab, FinalData);
                 _ ->
                     ok
             end,
             ets:update_counter(AccTab, po_coverage_counter, 1);
         false ->
-            case Dump of
+            case maps:get(dump_po_traces, ExtraOpts, undefined) of
                 all ->
                     io:format(user, "po trace ~p~n", [POH]),
-                    dump_trace(State, Tab, SimpMap);
+                    dump_trace(State, AccTab, Tab, FinalData);
                 _ ->
                     ok
             end,
@@ -635,9 +634,10 @@ path_traverse(TraceEntry, #{simp_map := SimpMap} = AnalysesData, AccTab, PathSta
                                                   "  available: ~p~n",
                                                   [Branch, StateNode, AvailableBranch]);
                                     false ->
-                                        io:format(user,
-                                                  "New branch ~p at ~p~n",
-                                                  [Branch, StateNode])
+                                        %% io:format(user,
+                                        %%           "New branch ~p at ~p~n",
+                                        %%           [Branch, StateNode]),
+                                        ok
                                 end,
                                 NewNode = ets:update_counter(AccTab, path_node_counter, 1),
                                 ets:insert(AccTab, {{path_branch, StateNode, Branch}, NewNode}),
@@ -964,31 +964,80 @@ merge_state_coverage(Tab, IterationId, AccTab, #{simp_map := SimpMap}) ->
 
 %% ==== Trace Dump ====
 
-dump_trace(#state{dump_traces_verbose = Verbose} = _State, Tab, SimpMap) ->
+unify(AccTab, Space, Term) ->
+    case ets:lookup(AccTab, {unify, Space, Term}) of
+        [] ->
+            NewId =
+                case ets:lookup(AccTab, {unify_counter, Space}) of
+                    [] ->
+                        ets:insert(AccTab, {{unify_counter, Space}, 1}),
+                        1;
+                    _ ->
+                        ets:update_counter(AccTab, {unify_counter, Space}, 1)
+                end,
+            ets:insert(AccTab, {{unify, Space, Term}, NewId}),
+            NewId;
+        [{_, Id}] ->
+            Id
+    end.
+
+dump_trace(#state{dump_traces_verbose = Verbose, extra_opts = ExtraOpts} = _State, AccTab, Tab, #{simp_map := SimpMap} = Data) ->
+    ToUnify = maps:get(unify, ExtraOpts, false),
     case Verbose of
         false ->
             TraceRev =
                 ets:foldl(
-                  fun (?TraceSchedule(_, _Where, ProcX, InfoX), Acc) ->
+                  fun (?TraceSchedule(TID, Where, ProcX, InfoX), Acc) ->
                           Proc = simplify(ProcX, SimpMap),
                           Info = simplify(InfoX, SimpMap),
-                          [ {schedule, Proc, Info} | Acc ];
-                      (?TraceSend(_, _Where, FromX, ToX, _Type, ContentX, _Effect), Acc) ->
+                          case ToUnify of
+                              true ->
+                                  [ {0, unify(AccTab, loc, Where), unify(AccTab, proc, Proc), 0, 0, unify(AccTab, schedule_info, Info),
+                                     case maps:is_key(racing_tids, Data) of
+                                         true ->
+                                             case sets:is_element(TID, maps:get(racing_tids, Data)) of
+                                                 true -> 1;
+                                                 false -> 0
+                                             end;
+                                         false -> 0
+                                     end
+                                    } | Acc ];
+                              false ->
+                                  [ {schedule, Proc, Info} | Acc ]
+                          end;
+                      (?TraceSend(_, Where, FromX, ToX, _Type, ContentX, _Effect), Acc) ->
                           From = simplify(FromX, SimpMap),
                           To = simplify(ToX, SimpMap),
                           Content = simplify(ContentX, SimpMap),
-                          [ {send, From, To, Content} | Acc ];
-                      (?TraceRecv(_, _Where, ToX, _Type, ContentX), Acc) ->
+                          case ToUnify of
+                              true ->
+                                  [ {1, unify(AccTab, loc, Where), unify(AccTab, proc, From), unify(AccTab, proc, To), unify(AccTab, term, Content), 0, 0} | Acc ];
+                              false ->
+                                  [ {send, From, To, Content} | Acc ]
+                          end;
+                      (?TraceRecv(_, Where, ToX, _Type, ContentX), Acc) ->
                           To = simplify(ToX, SimpMap),
                           Content = simplify(ContentX, SimpMap),
-                          [ {recv, To, Content} | Acc];
+                          case ToUnify of
+                              true ->
+                                  [ {2, unify(AccTab, loc, Where), unify(AccTab, proc, To), 0, unify(AccTab, term, Content), 0, 0} | Acc ];
+                              false ->
+                                  [ {recv, To, Content} | Acc]
+                          end;
                       (_, Acc) ->
                           Acc
                   end, [], Tab),
-            io:format(user,
-                      "Trace: ~p~n",
-                      [lists:reverse(TraceRev)]);
-
+            io:format(user, "TRACE BEGIN~n", []),
+            lists:foldr(
+              fun (Item, _) ->
+                      case ToUnify of
+                          true ->
+                              io:format(user, "~w~n", [Item]);
+                          false ->
+                              io:format(user, "~p~n", [Item])
+                      end
+              end, undefined, TraceRev),
+            io:format(user, "TRACE END~n", []);
         true ->
             io:format(user,
                       "Verbose trace: ~p~n",
@@ -1138,7 +1187,6 @@ init(Args) ->
     PredictBy = proplists:get_value(predict_by, Args, undefined),
     DumpTraces = proplists:get_value(dump_traces, Args, false),
     DumpTracesVerbose = proplists:get_value(dump_traces_verbose, Args, false),
-    DumpPOTraces = proplists:get_value(dump_po_traces, Args, false),
     FindRaces = proplists:get_value(find_races, Args, false),
     POCoverage = proplists:get_value(po_coverage, Args, false),
     PathCoverage = proplists:get_value(path_coverage, Args, false),
@@ -1168,7 +1216,6 @@ init(Args) ->
                         end
                   , dump_traces = DumpTraces
                   , dump_traces_verbose = DumpTracesVerbose
-                  , dump_po_traces = DumpPOTraces
                   , find_races = FindRaces
                   , po_coverage = POCoverage
                   , path_coverage = PathCoverage
@@ -1177,7 +1224,6 @@ init(Args) ->
                   , extra_handlers = ExtraHandlers
                   , extra_opts = ExtraOpts
                   },
-    io:format(user, "??? ~p~n", [State]),
     {ok, State}.
 
 handle_call({set_sht, SHT}, _From, State) ->
@@ -1201,7 +1247,7 @@ handle_call({finalize, TraceInfo, SHT},
     ets:insert(AccTab, {{iteration_info, IC}, TraceInfo}),
     R0 = #{simp_map => extract_simplify_map(SHT)},
     R1 = maybe_extract_partial_order_info(State, Tab, R0),
-    maybe_dump_trace(State, Tab, R1),
+    maybe_dump_trace(State, AccTab, Tab, R1),
     case POC of
         true ->
             merge_po_coverage(State, Tab, IC, AccTab, R1),
@@ -1341,14 +1387,14 @@ handle_call({predict_racing, Where, Proc, Info} = Req, _From, #state{sht = SHT, 
                     _ -> {true, true}
                 end
         end,
-    io:format(user, "Tracer ~p => ~w (hit: ~w)~n", [Req, Reply, Hit]),
+    %% io:format(user, "Tracer ~p => ~w (hit: ~w)~n", [Req, Reply, Hit]),
     {reply, Reply, State};
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.
 
-maybe_dump_trace(#state{dump_traces = true} = State, Tab, #{simp_map := SimpMap}) ->
-    dump_trace(State, Tab, SimpMap);
-maybe_dump_trace(_, _, _) ->
+maybe_dump_trace(#state{dump_traces = true} = State, AccTab, Tab, Data) ->
+    dump_trace(State, AccTab, Tab, Data);
+maybe_dump_trace(_, _, _, _) ->
     ok.
 
 maybe_extract_partial_order_info(#state{find_races = FindRaces, po_coverage = POC} = State, Tab, #{simp_map := SimpMap} = FinalData) ->

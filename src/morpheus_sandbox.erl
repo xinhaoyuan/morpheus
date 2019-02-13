@@ -333,7 +333,7 @@ ctl_init(Opts) ->
           , trace_send            = proplists:get_value(trace_send, Opts, false)
           , only_schedule_send    = proplists:get_value(only_schedule_send, Opts, false)
           , use_prediction        = proplists:get_value(use_prediction, Opts, false)
-          , prediction_weight     = proplists:get_value(prediction_weight, Opts, 3)
+          , prediction_weight     = proplists:get_value(prediction_weight, Opts, 10)
           , control_timeouts      = proplists:get_value(control_timeouts, Opts, true)
           , time_uncertainty      = proplists:get_value(time_uncertainty, Opts, 0)
           , stop_on_deadlock      = proplists:get_value(stop_on_deadlock, Opts, true)
