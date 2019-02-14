@@ -1344,8 +1344,8 @@ handle_call({add_trace, {report_state, TraceInfo, RState}}, _From, #state{tab = 
     Event = ?TraceReportState(TC, TraceInfo, RState),
     ets:insert(Tab, Event),
     {reply, ok, maybe_update_prediction_state(State, Event)};
-handle_call({predict_racing, Where, Proc, Info} = Req, _From, #state{sht = SHT, pred_state = PredState, acc_tab = AccTab} = State) ->
-    {Reply, Hit} =
+handle_call({predict_racing, Where, Proc, Info} = _Req, _From, #state{sht = SHT, pred_state = PredState, acc_tab = AccTab} = State) ->
+    {Reply, _Hit} =
         case State#state.to_predict andalso State#state.predict_by of
             false ->
                 {true, false};

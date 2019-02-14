@@ -733,15 +733,21 @@ ctl_check_and_receive(#sandbox_state{opt = Opt,
                                                     OriginReq),
                                       case ToSchedule of
                                           true ->
-                                              %% case predict_to_skip(S, DelayReq, OriginReq) of
-                                              %%     true ->
-                                              %%         self() ! #fd_delay_resp{ref = DelayReq#fd_delay_req.ref},
-                                              %%         {CurS, AID, false};
-                                              %%     false ->
-                                              %%         {ctl_push_request_to_scheduler(CurS, DelayReq), AID, ToNotify}
-                                              %% end;
-                                              DelayReqP = maybe_with_prediction(S, DelayReq, OriginReq),
-                                              {ctl_push_request_to_scheduler(CurS, DelayReqP), AID, ToNotify};
+                                              case S#sandbox_state.opt#sandbox_opt.use_prediction of
+                                                  skip ->
+                                                      case predict_to_skip(S, DelayReq, OriginReq) of
+                                                          true ->
+                                                              self() ! #fd_delay_resp{ref = DelayReq#fd_delay_req.ref},
+                                                              {CurS, AID, false};
+                                                          false ->
+                                                              {ctl_push_request_to_scheduler(CurS, DelayReq), AID, ToNotify}
+                                                      end;
+                                                  true ->
+                                                      DelayReqP = maybe_with_prediction(S, DelayReq, OriginReq),
+                                                      {ctl_push_request_to_scheduler(CurS, DelayReqP), AID, ToNotify};
+                                                  _ ->
+                                                      {ctl_push_request_to_scheduler(CurS, DelayReq), AID, ToNotify}
+                                              end;
                                           false ->
                                               self() ! {handle_buffer, DelayReq#fd_delay_req.ref},
                                               {CurS, AID, false}
@@ -811,11 +817,11 @@ maybe_skip_only_send(#sandbox_state{opt = #sandbox_opt{only_schedule_send = true
 maybe_skip_only_send(_, _) ->
     false.
 
-%% predict_to_skip(#sandbox_state{opt = #sandbox_opt{use_prediction = true, tracer_pid = TP}}, DelayReq, Req) when TP =/= undefined ->
-%%     #fd_delay_req{data = #{where := Where, from := From}} = DelayReq,
-%%     not ?T:predict_racing(TP, Where, From, Req);
-%% predict_to_skip(_, _, _) ->
-%%     false.
+predict_to_skip(#sandbox_state{opt = #sandbox_opt{use_prediction = true, tracer_pid = TP}}, DelayReq, Req) when TP =/= undefined ->
+    #fd_delay_req{data = #{where := Where, from := From}} = DelayReq,
+    not ?T:predict_racing(TP, Where, From, Req);
+predict_to_skip(_, _, _) ->
+    false.
 
 maybe_with_prediction(#sandbox_state{opt = #sandbox_opt{ use_prediction = true
                                                        , prediction_weight = PW
@@ -893,6 +899,18 @@ ctl_handle_call(S, _Where, ?cci_log(_L)) ->
     {S, ok};
 ctl_handle_call(#sandbox_state{scheduler_push_counter = SPC} = S, _Where, {query, scheduler_push_counter}) ->
     {S, SPC};
+ctl_handle_call(#sandbox_state{opt = #sandbox_opt{fd_scheduler = Sched}} = S, _Where, {query, fd_dequeue_counter}) ->
+    case Sched of
+        undefined ->
+            {S, undefined};
+        _ ->
+            case fd_scheduler:call(Sched, {get_trace_info}) of
+                #{dequeue_count := DC} ->
+                    {S, DC};
+                _ ->
+                    {S, undefined}
+            end
+    end;
 ctl_handle_call(S, _Where, ?cci_initial_kick()) ->
     {S#sandbox_state{initial = false}, ok};
 ctl_handle_call(S, _Where, {ets_op}) ->
@@ -2213,6 +2231,7 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT, proc_shtable = SHT} = S
             _ ->
                 fd_get_trace_info(FdSched)
         end,
+    ?INFO("trace info: ~p", [FdTraceInfo]),
     case DiffisoPort of
         undefined ->
             ok;
