@@ -915,6 +915,9 @@ ctl_handle_call(S, _Where, ?cci_initial_kick()) ->
     {S#sandbox_state{initial = false}, ok};
 ctl_handle_call(S, _Where, {ets_op}) ->
     {S, ok};
+ctl_handle_call(#sandbox_state{opt = #sandbox_opt{fd_scheduler = FdSched}} = S, _Where, {set_fd_guidance, Guidance}) ->
+    fd_scheduler:call(FdSched, {set_guidance, Guidance}),
+    {S, ok};
 ctl_handle_call(#sandbox_state{proc_table = PT} = S,
                 _Where, ?cci_ets_all()) ->
     Ret = lists:foldr(
