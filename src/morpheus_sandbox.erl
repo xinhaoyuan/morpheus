@@ -77,8 +77,9 @@
         , aux_module            :: undefined | module()
         , aux_data              :: term()
         , undet_timeout         :: integer()
-        , fd_opts               :: term()
+        , fd_opts               :: undefined | term()
         , fd_scheduler          :: undefined | pid()
+        , tracer_opts           :: undefined | term()
         , tracer_pid            :: undefined | pid()
         , diffiso_port          :: undefined | integer()
         }).
@@ -316,15 +317,21 @@ ctl_init(Opts) ->
                     | FdOpts ]),
                 whereis(fd_sched)
         end,
+    TracerOpts = proplists:get_value(tracer_opts, Opts),
     TracerPid =
-        case proplists:get_value(tracer_opts, Opts) of
+        case TracerOpts of
             undefined ->
-                undefined;
-            TracerOpts ->
-                {ok, TP} = ?T:start_link(TracerOpts),
-                ?T:set_sht(TP, SHT),
-                TP
+                proplists:get_value(tracer_pid, Opts);
+            _ ->
+                {ok, _TP} = ?T:start_link(TracerOpts),
+                _TP
         end,
+    case TracerPid of
+        undefined ->
+            ok;
+        _ ->
+            ?T:set_sht(TracerPid, SHT)
+    end,
     S = #sandbox_state
         { opt = #sandbox_opt
           { verbose_ctl_req       = proplists:get_value(verbose_ctl, Opts, false)
@@ -344,6 +351,7 @@ ctl_init(Opts) ->
           , undet_timeout         = proplists:get_value(undet_timeout, Opts, 50)
           , fd_opts               = FdOpts
           , fd_scheduler          = FdSched
+          , tracer_opts           = TracerOpts
           , tracer_pid            = TracerPid
           , diffiso_port          = get_from_opts_or_env(diffiso_port, Opts, "DIFFISO_PORT", fun list_to_integer/1)
           }
@@ -817,10 +825,10 @@ maybe_skip_only_send(#sandbox_state{opt = #sandbox_opt{only_schedule_send = true
 maybe_skip_only_send(_, _) ->
     false.
 
-predict_to_skip(#sandbox_state{opt = #sandbox_opt{use_prediction = true, tracer_pid = TP}}, DelayReq, Req) when TP =/= undefined ->
+predict_to_skip(#sandbox_state{opt = #sandbox_opt{use_prediction = skip, tracer_pid = TP}}, DelayReq, Req) when TP =/= undefined ->
     #fd_delay_req{data = #{where := Where, from := From}} = DelayReq,
     not ?T:predict_racing(TP, Where, From, Req);
-predict_to_skip(_, _, _) ->
+predict_to_skip(_S, _, _) ->
     false.
 
 maybe_with_prediction(#sandbox_state{opt = #sandbox_opt{ use_prediction = true
@@ -2251,6 +2259,10 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT, proc_shtable = SHT} = S
         undefined -> ok;
         _ ->
             ?T:finalize(TP, FdTraceInfo, SHT)
+    end,
+    case S#sandbox_state.opt#sandbox_opt.tracer_opts of
+        undefined -> ok;
+        _ -> ?T:stop(TP)
     end,
     exit(Reason).
 

@@ -4,6 +4,7 @@
 
 %% API.
 -export([ start_link/1
+        , stop/1
         , set_sht/2
         , predict_racing/4
         , trace_schedule/4
@@ -16,6 +17,7 @@
         , trace_barrier/1
         , trace_report_state/3
         , finalize/3
+        , dump_trace/1
         , create_ets_tab/0
         , create_acc_ets_tab/0
         , open_or_create_acc_ets_tab/1
@@ -49,6 +51,7 @@
         , line_coverage           :: boolean()
         , state_coverage          :: boolean()
         , extra_handlers          :: [module()]
+        , final_data              :: term()
         , extra_opts              :: #{}
         }).
 
@@ -83,6 +86,9 @@
 -spec start_link(term()) -> {ok, pid()}.
 start_link(Args) ->
     gen_server:start_link(?MODULE, Args, []).
+
+stop(T) ->
+    gen_server:stop(T).
 
 set_sht(T, SHT) ->
     gen_server:call(T, {set_sht, SHT}, infinity).
@@ -119,6 +125,9 @@ trace_report_state(T, TraceInfo, State) ->
 
 finalize(T, TraceInfo, SHT) ->
     gen_server:call(T, {finalize, TraceInfo, SHT}, infinity).
+
+dump_trace(T) ->
+    gen_server:call(T, {dump_trace}, infinity).
 
 create_ets_tab() ->
     Tab = ets:new(trace_tab, [ordered_set, public, {write_concurrency, true}]),
@@ -1222,6 +1231,7 @@ init(Args) ->
                   , line_coverage = LineCoverage
                   , state_coverage = StateCoverage
                   , extra_handlers = ExtraHandlers
+                  , final_data = undefined
                   , extra_opts = ExtraOpts
                   },
     {ok, State}.
@@ -1298,7 +1308,7 @@ handle_call({finalize, TraceInfo, SHT},
         true -> io:format(user, "Tracer finalize data: ~p~n", [RFinal]);
         false -> ok
     end,
-    {reply, RFinal, State};
+    {reply, RFinal, State#state{final_data = RFinal}};
 handle_call({add_trace, {schedule, Where, Proc, Info}}, _From, #state{tab = Tab} = State) when Tab =/= undefined ->
     TC = ets:update_counter(Tab, trace_counter, 1),
     Event = ?TraceSchedule(TC, Where, Proc, Info),
@@ -1389,7 +1399,11 @@ handle_call({predict_racing, Where, Proc, Info} = _Req, _From, #state{sht = SHT,
         end,
     %% io:format(user, "Tracer ~p => ~w (hit: ~w)~n", [Req, Reply, Hit]),
     {reply, Reply, State};
+handle_call({dump_trace}, _From, #state{tab = Tab, acc_tab = AccTab, final_data = FinalData} = State) ->
+    dump_trace(State, AccTab, Tab, FinalData),
+    {reply, ok, State};
 handle_call(_Request, _From, State) ->
+    %% io:format(user, "tracer ignored the call ~p~n", [_Request]),
     {reply, ignored, State}.
 
 maybe_dump_trace(#state{dump_traces = true} = State, AccTab, Tab, Data) ->
