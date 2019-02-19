@@ -18,6 +18,7 @@
         , trace_report_state/3
         , finalize/3
         , dump_trace/1
+        , dump_trace/2
         , create_ets_tab/0
         , create_acc_ets_tab/0
         , open_or_create_acc_ets_tab/1
@@ -127,7 +128,10 @@ finalize(T, TraceInfo, SHT) ->
     gen_server:call(T, {finalize, TraceInfo, SHT}, infinity).
 
 dump_trace(T) ->
-    gen_server:call(T, {dump_trace}, infinity).
+    gen_server:call(T, {dump_trace, #{}}, infinity).
+
+dump_trace(T, Opts) ->
+    gen_server:call(T, {dump_trace, Opts}, infinity).
 
 create_ets_tab() ->
     Tab = ets:new(trace_tab, [ordered_set, public, {write_concurrency, true}]),
@@ -990,17 +994,32 @@ unify(AccTab, Space, Term) ->
             Id
     end.
 
-dump_trace(#state{dump_traces_verbose = Verbose, extra_opts = ExtraOpts} = _State, AccTab, Tab, #{simp_map := SimpMap} = Data) ->
-    ToUnify = maps:get(unify, ExtraOpts, false),
+dump_trace(#state{dump_traces_verbose = Verbose, extra_opts = ExtraOpts} = _State, AccTab, Tab, #{simp_map := SimpMap0} = Data) ->
+    {Format, SimpMap} =
+        case maps:get(human_readable, ExtraOpts, false) of
+            false ->
+                case maps:get(unify, ExtraOpts, false) of
+                    false ->
+                        {normal, SimpMap0};
+                    true ->
+                        {unify, SimpMap0}
+                end;
+            true ->
+                {normal, localize_simp_map(SimpMap0)}
+        end,
     case Verbose of
         false ->
             TraceRev =
                 ets:foldl(
-                  fun (?TraceSchedule(TID, Where, ProcX, InfoX), Acc) ->
+                  fun (?TraceNewProcess(_, ProcX, _AbsId, CreatorX, EntryInfo), Acc) when Format =:= normal ->
+                          Proc = simplify(ProcX, SimpMap),
+                          Creator = simplify(CreatorX, SimpMap),
+                          [ {new_proc, Proc, Creator, EntryInfo} | Acc];
+                      (?TraceSchedule(TID, Where, ProcX, InfoX), Acc) ->
                           Proc = simplify(ProcX, SimpMap),
                           Info = simplify(InfoX, SimpMap),
-                          case ToUnify of
-                              true ->
+                          case Format of
+                              unify ->
                                   [ {0, unify(AccTab, loc, Where), unify(AccTab, proc, Proc), 0, 0, unify(AccTab, schedule_info, Info),
                                      case maps:is_key(racing_tids, Data) of
                                          true ->
@@ -1011,27 +1030,27 @@ dump_trace(#state{dump_traces_verbose = Verbose, extra_opts = ExtraOpts} = _Stat
                                          false -> 0
                                      end
                                     } | Acc ];
-                              false ->
-                                  [ {schedule, Proc, Info} | Acc ]
+                              normal ->
+                                  [ {schedule, Where, Proc, Info} | Acc ]
                           end;
                       (?TraceSend(_, Where, FromX, ToX, _Type, ContentX, _Effect), Acc) ->
                           From = simplify(FromX, SimpMap),
                           To = simplify(ToX, SimpMap),
                           Content = simplify(ContentX, SimpMap),
-                          case ToUnify of
-                              true ->
+                          case Format of
+                              unify ->
                                   [ {1, unify(AccTab, loc, Where), unify(AccTab, proc, From), unify(AccTab, proc, To), unify(AccTab, term, Content), 0, 0} | Acc ];
-                              false ->
-                                  [ {send, From, To, Content} | Acc ]
+                              normal ->
+                                  [ {send, Where, From, To, Content} | Acc ]
                           end;
                       (?TraceRecv(_, Where, ToX, _Type, ContentX), Acc) ->
                           To = simplify(ToX, SimpMap),
                           Content = simplify(ContentX, SimpMap),
-                          case ToUnify of
-                              true ->
+                          case Format of
+                              unify ->
                                   [ {2, unify(AccTab, loc, Where), unify(AccTab, proc, To), 0, unify(AccTab, term, Content), 0, 0} | Acc ];
-                              false ->
-                                  [ {recv, To, Content} | Acc]
+                              normal ->
+                                  [ {recv, Where, To, Content} | Acc]
                           end;
                       (_, Acc) ->
                           Acc
@@ -1039,10 +1058,10 @@ dump_trace(#state{dump_traces_verbose = Verbose, extra_opts = ExtraOpts} = _Stat
             io:format(user, "TRACE BEGIN~n", []),
             lists:foldr(
               fun (Item, _) ->
-                      case ToUnify of
-                          true ->
+                      case Format of
+                          unify ->
                               io:format(user, "~w~n", [Item]);
-                          false ->
+                          normal ->
                               io:format(user, "~p~n", [Item])
                       end
               end, undefined, TraceRev),
@@ -1053,6 +1072,20 @@ dump_trace(#state{dump_traces_verbose = Verbose, extra_opts = ExtraOpts} = _Stat
                       [ets:match(Tab, '$1')])
     end,
     ok.
+
+localize_simp_map(SimpMap) ->
+    SimpMap1 =
+        maps:from_list(
+          lists:foldr(
+            fun ({K, {P, C}}, L) when is_reference(K) ->
+                    [{K, {'$r', P, C}} | L];
+                ({K, _}, L) when is_pid(K) ->
+                    [{K, K} | L];
+                ({K, V}, L) ->
+                    [{K, V} | L]
+            end, [], maps:to_list(SimpMap))
+         ),
+    SimpMap1.
 
 %% ========
 
@@ -1092,7 +1125,9 @@ simplify(Data, SimpMap) when is_reference(Data) ->
         {Pid, CreationCount} ->
             {simplify(Pid, SimpMap), CreationCount};
         undefined ->
-            Data
+            Data;
+        Else ->
+            Else
     end;
 simplify(Data, _SimpMap) when is_function(Data) ->
     %% Function? Ignore for now...
@@ -1399,8 +1434,8 @@ handle_call({predict_racing, Where, Proc, Info} = _Req, _From, #state{sht = SHT,
         end,
     %% io:format(user, "Tracer ~p => ~w (hit: ~w)~n", [Req, Reply, Hit]),
     {reply, Reply, State};
-handle_call({dump_trace}, _From, #state{tab = Tab, acc_tab = AccTab, final_data = FinalData} = State) ->
-    dump_trace(State, AccTab, Tab, FinalData),
+handle_call({dump_trace, Opts}, _From, #state{tab = Tab, acc_tab = AccTab, final_data = FinalData, extra_opts = ExtraOpts} = State) ->
+    dump_trace(State#state{extra_opts = maps:merge(Opts, ExtraOpts)}, AccTab, Tab, FinalData),
     {reply, ok, State};
 handle_call(_Request, _From, State) ->
     %% io:format(user, "tracer ignored the call ~p~n", [_Request]),
