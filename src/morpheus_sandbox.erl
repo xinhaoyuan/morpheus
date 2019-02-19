@@ -511,7 +511,7 @@ ctl_loop(S0) ->
                 false ->
                     ctl_loop(ctl_loop_call(S, Where, ToTrace, Pid, Ref, Req))
             end;
-        #fd_delay_resp{ref = Ref} ->
+        #fd_delay_resp{ref = Ref, data = DelayRespData} ->
             {SAfterPop, Where, ReplyTo, Ref, Req} = ctl_pop_request_from_buffer(S, Ref),
             case ToTrace of
                 true -> ?INFO("schedule resp ~p", [Req]);
@@ -521,7 +521,7 @@ ctl_loop(S0) ->
                 undefined ->
                     ok;
                 T when is_pid(ReplyTo) ->
-                    ?T:trace_schedule(T, Where, ReplyTo, Req);
+                    ?T:trace_schedule(T, Where, ReplyTo, {Req, DelayRespData});
                 _ ->
                     ok
             end,
@@ -745,7 +745,7 @@ ctl_check_and_receive(#sandbox_state{opt = Opt,
                                                   skip ->
                                                       case predict_to_skip(S, DelayReq, OriginReq) of
                                                           true ->
-                                                              self() ! #fd_delay_resp{ref = DelayReq#fd_delay_req.ref},
+                                                              self() ! #fd_delay_resp{ref = DelayReq#fd_delay_req.ref, data = undefined},
                                                               {CurS, AID, false};
                                                           false ->
                                                               {ctl_push_request_to_scheduler(CurS, DelayReq), AID, ToNotify}
