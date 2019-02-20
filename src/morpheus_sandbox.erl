@@ -512,7 +512,7 @@ ctl_loop(S0) ->
                     ctl_loop(ctl_loop_call(S, Where, ToTrace, Pid, Ref, Req))
             end;
         #fd_delay_resp{ref = Ref, data = DelayRespData} ->
-            {SAfterPop, Where, ReplyTo, Ref, Req} = ctl_pop_request_from_buffer(S, Ref),
+            {SAfterPop, Where, ReplyTo, Ref, Req, ReqData} = ctl_pop_request_from_buffer(S, Ref),
             case ToTrace of
                 true -> ?INFO("schedule resp ~p", [Req]);
                 false -> ok
@@ -521,7 +521,7 @@ ctl_loop(S0) ->
                 undefined ->
                     ok;
                 T when is_pid(ReplyTo) ->
-                    ?T:trace_schedule(T, Where, ReplyTo, {Req, DelayRespData});
+                    ?T:trace_schedule(T, Where, ReplyTo, {Req, maps:get(weight, ReqData, undefined), DelayRespData});
                 _ ->
                     ok
             end,
@@ -533,7 +533,7 @@ ctl_loop(S0) ->
             end;
         {handle_buffer, Ref} ->
             %% almost like above, but without tracer call
-            {SAfterPop, Where, ReplyTo, Ref, Req} = ctl_pop_request_from_buffer(S, Ref),
+            {SAfterPop, Where, ReplyTo, Ref, Req, _ReqData} = ctl_pop_request_from_buffer(S, Ref),
             case ToTrace of
                 true -> ?INFO("resume resp ~p", [Req]);
                 false -> ok
@@ -600,7 +600,7 @@ ctl_push_request_to_buffer(
                 , waiting = Waiting} = S,
   #{where := Where} = Data0, AID, ReplyTo, Ref, Req) ->
     Data = fill_in_data(S, Data0, ReplyTo, Req),
-    NewWaiting = dict:store(Ref, {Where, ReplyTo, Req}, Waiting),
+    NewWaiting = dict:store(Ref, {Where, ReplyTo, Req, Data}, Waiting),
     NewBuffer = [{case ReplyTo of
                       undet -> -AID - 1;
                       _ -> AID
@@ -644,26 +644,26 @@ ctl_pop_request_from_buffer(#sandbox_state{waiting_counter = WC, waiting = Waiti
     case dict:take(Ref, Waiting) of
         error ->
             error(pop_request_failed);
-        {{Where, ReplyTo, Req}, NewWaiting} ->
+        {{Where, ReplyTo, Req, Data}, NewWaiting} ->
             case ReplyTo of
                 undet ->
                     %% undet async request
                     {S#sandbox_state{
                        waiting_counter = WC - 1,
                        waiting = NewWaiting},
-                     Where, ReplyTo, Ref, Req};
+                     Where, ReplyTo, Ref, Req, Data};
                 timeout ->
                     {S#sandbox_state{
                        waiting_counter = WC - 1,
                        waiting = NewWaiting},
-                     Where, ReplyTo, Ref, Req};
+                     Where, ReplyTo, Ref, Req, Data};
                 _ ->
                     {S#sandbox_state{
                        alive = [ReplyTo | S#sandbox_state.alive],
                        alive_counter = S#sandbox_state.alive_counter + 1,
                        waiting_counter = WC - 1,
                        waiting = NewWaiting},
-                     Where, ReplyTo, Ref, Req}
+                     Where, ReplyTo, Ref, Req, Data}
             end
     end.
 
