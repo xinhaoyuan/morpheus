@@ -512,7 +512,7 @@ ctl_loop(S0) ->
                     ctl_loop(ctl_loop_call(S, Where, ToTrace, Pid, Ref, Req))
             end;
         #fd_delay_resp{ref = Ref, data = DelayRespData} ->
-            {SAfterPop, Where, ReplyTo, Ref, Req, ReqData} = ctl_pop_request_from_buffer(S, Ref),
+            {SAfterPop, Where, ReplyTo, Ref, Req, _ReqData} = ctl_pop_request_from_buffer(S, Ref),
             case ToTrace of
                 true -> ?INFO("schedule resp ~p", [Req]);
                 false -> ok
@@ -521,7 +521,7 @@ ctl_loop(S0) ->
                 undefined ->
                     ok;
                 T when is_pid(ReplyTo) ->
-                    ?T:trace_schedule(T, Where, ReplyTo, {Req, maps:get(weight, ReqData, undefined), DelayRespData});
+                    ?T:trace_schedule(T, Where, ReplyTo, {Req, DelayRespData});
                 _ ->
                     ok
             end,
