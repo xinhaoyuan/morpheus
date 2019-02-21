@@ -2573,7 +2573,7 @@ handle_signals(Where) ->
             ok;
         {_, {_From, Reason}} ->
             Ctl = get_ctl(),
-            ?cc_trace_receive(Ctl, [], self(), signal, undefinedf),
+            ?cc_trace_receive(Ctl, [], self(), signal, undefined),
             before_tomb(),
             %% cannot throw exit since it may be caught by the guest ...
             ?DEBUG("~p got exit signal from ~w: ~p", [self(), _From, Reason]),
