@@ -868,6 +868,9 @@ ctl_call_to_delay(false, {delay, _}) -> true;
 ctl_call_to_delay(false, _) -> false.
 
 ctl_call_target(?cci_send_msg(_From, To, _Msg)) -> To;
+ctl_call_target(?cci_register_process(Node, Name, _Proc)) -> {Node, Name};
+ctl_call_target(?cci_unregister(Node, Name)) -> {Node, Name};
+ctl_call_target(?cci_whereis(_FromNode, Node, Name)) -> {Node, Name};
 ctl_call_target(_) -> global.
 
 ctl_call_target_type(_) -> morpheus_call.
