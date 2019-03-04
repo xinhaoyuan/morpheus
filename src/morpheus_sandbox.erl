@@ -3390,7 +3390,11 @@ handle_ets(F, A, {_Old, _New, Ann}) ->
             call_ctl(get_ctl(), Ann, {maybe_delay, ?cci_log({ets_op, F, A})}),
             %% essentially we are trying to virtualize the ets namespace
             if
-                F =:= file2tab; F =:= tabfile_info; F =:= module_info; A =:= [] ->
+                F =:= file2tab; F =:= tabfile_info; F =:= module_info; F =:= repair_continuation; A =:= [] ->
+                    apply(ets, F, A);
+                F =:= select, length(A) =:= 1 ->
+                    apply(ets, F, A);
+                F =:= select_reverse, length(A) =:= 1 ->
                     apply(ets, F, A);
                 F =:= foldl; F =:= foldr ->
                     [Fun, Acc, Tab] = A,
