@@ -3,8 +3,8 @@
 -define(MORPHEUS_CB_TRACE_SEND_FILTER(Data, From, To, Type, Content), ?MORPHEUS_CB_TRACE_SEND_FILTER_FN(Data, From, To, Type, Content)).
 -define(MORPHEUS_CB_TRACE_RECEIVE_FILTER_FN, '$morpheus$trace_receive_filter').
 -define(MORPHEUS_CB_TRACE_RECEIVE_FILTER(Data, To, Type, Content), ?MORPHEUS_CB_TRACE_RECEIVE_FILTER_FN(Data, To, Type, Content)).
--define(MORPHEUS_CB_DELAY_LEVEL_FN, '$morpheus$delay_level').
--define(MORPHEUS_CB_DELAY_LEVEL(Data, Req), ?MORPHEUS_CB_DELAY_LEVEL_FN(Data, Req)).
+-define(MORPHEUS_CB_ANNOTATE_SCHED_DATA_FN, '$morpheus$annotate_sched_data').
+-define(MORPHEUS_CB_ANNOTATE_SCHED_DATA(AuxData, Data, From, Req), ?MORPHEUS_CB_ANNOTATE_SCHED_DATA_FN(AuxData, Data, From, Req)).
 -define(MORPHEUS_CB_TO_DELAY_CALL_FN, '$morpheus$to_delay_call').
 -define(MORPHEUS_CB_TO_DELAY_CALL(Data, FromMod, M, F, A), ?MORPHEUS_CB_TO_DELAY_CALL_FN(Data, FromMod, M, F, A)).
 -define(MORPHEUS_CB_TO_OVERRIDE_FN, '$morpheus$to_override').

@@ -578,20 +578,19 @@ ctl_loop(S0) ->
             ctl_loop(S)
     end.
 
-fill_in_data(#sandbox_state{opt = #sandbox_opt{aux_module = Aux} = Opt}, Data, From, Req) ->
-    D1 =
-        case (erlang:function_exported(Aux, ?MORPHEUS_CB_DELAY_LEVEL_FN, 2) andalso
-              Aux:?MORPHEUS_CB_DELAY_LEVEL(Opt#sandbox_opt.aux_data, Req)) of
-            false ->
-                Data;
-            L when is_integer(L) ->
-                %% ?INFO("Set delay level ~w to req ~w", [L, Req]),
-                Data#{delay_level => L}
-        end,
-    D2 = D1#{from => From},
-    D2;
-fill_in_data(_, Data, _, _) ->
-    Data.
+fill_in_data(S, Data0, From, Req) ->
+    Data = Data0#{from => From},
+    case S of
+        #sandbox_state{opt = #sandbox_opt{aux_module = Aux, aux_data = AuxData}}
+          when Aux =/= undefined ->
+            case erlang:function_exported(Aux, ?MORPHEUS_CB_ANNOTATE_SCHED_DATA_FN, 4) of
+                true ->
+                    Aux:?MORPHEUS_CB_ANNOTATE_SCHED_DATA(AuxData, Data, From, Req);
+                false ->
+                    Data
+            end;
+        _ -> Data
+    end.
 
 ctl_push_request_to_buffer(
   #sandbox_state{ buffer_counter = BC
