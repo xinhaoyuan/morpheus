@@ -15,23 +15,18 @@ all_test_() ->
 
 t_basic() ->
     Tab = ?T:create_ets_tab(),
-    {Ctl, MRef} = ?S:start(?MODULE, basic_test_entry, [],
+    {ok, Tracer} = ?T:start_link([{tab, Tab}, {acc_filename, "acc.dat"}]),
+    {Ctl, MRef} = ?S:start(?MODULE, receive_entry, [],
                            [ monitor
-                           , {tracer_args, [{tab, Tab}, {acc_filename, "acc.dat"}]}
+                           , {tracer_pid, Tracer}
+                           , {fd_opts, [{scheduler, {rw, []}}]}
                            ]),
     success = receive {'DOWN', MRef, _, _, Reason} -> Reason end,
     ets:foldl(fun (E, Acc) ->
                       io:format(user, "~p~n", [E]),
                       Acc
               end, undefined, Tab),
-    AccTab = ?T:create_acc_ets_tab(),
-    ?T:merge_path(Tab, AccTab),
-    [NodeCount1] = ets:lookup(AccTab, node_counter),
-    %% make sure that adding the same path does not create new path nodes.
-    ?T:merge_path(Tab, AccTab),
-    [NodeCount1] = ets:lookup(AccTab, node_counter),
-    %% [PathCount] = ets:lookup(AccTab, path_counter),
-    %% io:format(user, "~p~n", [PathCount]),
+    ?T:stop(Tracer),
     os:cmd("rm acc.dat"),
     ok.
 
@@ -43,4 +38,20 @@ basic_test_entry() ->
              receive yo -> ok end,
              Loop(X - 1)
      end)(5),
+    ?G:exit_with(success).
+
+receive_entry() ->
+    self() ! msg,
+    receive
+        msg ->
+            ok
+    after 0 ->
+            ok
+    end,
+    receive
+        msg ->
+            ok
+    after 0 ->
+            ok
+    end,
     ?G:exit_with(success).

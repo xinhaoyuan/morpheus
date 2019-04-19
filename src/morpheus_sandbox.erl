@@ -1469,6 +1469,7 @@ ctl_handle_call(#sandbox_state{ opt = Opt
                               , proc_shtable = SHT
                               , alive_counter = AC} = S,
                 Where, ?cci_process_receive(Proc, PatFun, Timeout)) ->
+    %% XXX Can we have atomicity violation?
     PT = ?TABLE_REMOVE(PT0, {receive_status, Proc}),
     Ref = make_ref(),
     case ?SHTABLE_GET(SHT, {signal, Proc}) of
@@ -1491,10 +1492,11 @@ ctl_handle_call(#sandbox_state{ opt = Opt
             case Match of
                 not_found ->
                     case Timeout of
-                        0 ->
-                            ctl_trace_receive(Opt, SHT, Where, Proc, timeout, undefined),
-                            Proc ! {self(), Ref, timeout},
-                            {S, Ref};
+                        %% Now we use an '$instant_timeout$'
+                        %% 0 ->
+                        %%     ctl_trace_receive(Opt, SHT, Where, Proc, timeout, undefined),
+                        %%     Proc ! {self(), Ref, timeout},
+                        %%     {S, Ref};
                         infinity ->
                             PT1 = ?TABLE_SET(PT, {receive_status, Proc}, {Ref, Where, PatFun0, infinity}),
                             {S#sandbox_state{proc_table = PT1,
@@ -1532,9 +1534,17 @@ ctl_handle_call(#sandbox_state{ opt = Opt
                     end;
                 {found, Pos} ->
                     {M, NewMsgQueue} = ?H:take_nth(Pos, MsgQueue),
-                    PT1 = ?TABLE_SET(PT, {msg_queue, Proc}, NewMsgQueue),
                     ctl_trace_receive(Opt, SHT, Where, Proc, message, M),
                     Proc ! {self(), Ref, [message | M]},
+                    PT1 =
+                        case Timeout =:= 0 andalso M =/= '$instant_timeout$' of
+                            true ->
+                                NewMsgQueue1 = NewMsgQueue -- ['$instant_timeout$'],
+                                ctl_trace_receive(Opt, SHT, Where, Proc, message, '$instant_timeout$'),
+                                ?TABLE_SET(PT, {msg_queue, Proc}, NewMsgQueue1);
+                            false ->
+                                ?TABLE_SET(PT, {msg_queue, Proc}, NewMsgQueue)
+                        end,
                     {S#sandbox_state{proc_table = PT1}, Ref}
             end;
         _ ->
@@ -2483,13 +2493,20 @@ handle(Old, New, Tag, Args, Ann) ->
             {M0, F0, A0} = rewrite_call(Ann, M, F, A),
             apply(M0, F0, A0);
         {'receive', [PatFun, Timeout]} ->
+            Ctl = get_ctl(),
             if
                 Timeout =:= infinity orelse (is_integer(Timeout) andalso Timeout >= 0) ->
                     ok;
                 true ->
                     error(timeout_value)
             end,
-            Ctl = get_ctl(),
+            PatFun1 =
+                case Timeout of
+                    0 ->
+                        ?cc_send_msg(Ctl, Ann, self(), self(), '$instant_timeout$'), 
+                        fun (M) -> PatFun(M) orelse (M =:= '$instant_timeout$') end;
+                    _ -> PatFun
+                end,
             {ok, UndetMsgsToOmit} = call_ctl(Ctl, Ann, {receive_prepare, self()}),
             %% From now on, until ctl returns a message, the message queue is locked
             (fun F(N) ->
@@ -2510,13 +2527,15 @@ handle(Old, New, Tag, Args, Ann) ->
              end)(UndetMsgsToOmit),
             handle_undet_message(Ctl, Ann),
             handle_signals(Ann),
-            {ok, Ref} = ?cc_process_receive(Ctl, Ann, self(), PatFun, Timeout),
+            {ok, Ref} = ?cc_process_receive(Ctl, Ann, self(), PatFun1, Timeout),
             R = handle_receive(Ctl, Ann, Ref),
             %% Now the message queue is unlocked
             case R of
                 signal ->
                     handle_signals(Ann);
                 timeout ->
+                    timeout;
+                [message | '$instant_timeout$'] ->
                     timeout;
                 [message | _] ->
                     R
