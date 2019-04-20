@@ -71,6 +71,7 @@
         , prediction_weight     :: integer()
         , control_timeouts      :: boolean()
         , time_uncertainty      :: integer()
+        , execution_limit       :: integer()
         , stop_on_deadlock      :: boolean()
         , scoped_weight         :: boolean()
         , heartbeat             :: false | once | integer()
@@ -343,6 +344,7 @@ ctl_init(Opts) ->
           , prediction_weight     = proplists:get_value(prediction_weight, Opts, 10)
           , control_timeouts      = proplists:get_value(control_timeouts, Opts, true)
           , time_uncertainty      = proplists:get_value(time_uncertainty, Opts, 0)
+          , execution_limit       = proplists:get_value(execution_limit, Opts, infinity)
           , stop_on_deadlock      = proplists:get_value(stop_on_deadlock, Opts, true)
           , scoped_weight         = proplists:get_value(scoped_weight, Opts, undefined)
           , heartbeat             = proplists:get_value(heartbeat, Opts, 10000)
@@ -666,7 +668,7 @@ ctl_pop_request_from_buffer(#sandbox_state{waiting_counter = WC, waiting = Waiti
             end
     end.
 
-ctl_push_request_to_scheduler(#sandbox_state{ opt = #sandbox_opt{fd_scheduler = Sched}
+ctl_push_request_to_scheduler(#sandbox_state{ opt = #sandbox_opt{fd_scheduler = Sched, execution_limit = ELimit}
                                             , proc_shtable = SHT
                                             , scheduler_push_counter = SPC} = S,
                               Req) when Sched =/= undefined ->
@@ -680,8 +682,14 @@ ctl_push_request_to_scheduler(#sandbox_state{ opt = #sandbox_opt{fd_scheduler = 
             _ ->
                 Data
         end,
-    Sched ! Req#fd_delay_req{data = Data1},
-    S#sandbox_state{scheduler_push_counter = SPC + 1}.
+    case SPC >= ELimit of
+        true ->
+            cast_ctl(self(), {stop, execution_limit_reached}),
+            S;
+        false ->
+            Sched ! Req#fd_delay_req{data = Data1},
+            S#sandbox_state{scheduler_push_counter = SPC + 1}
+    end.
 
 ctl_notify_scheduler(#sandbox_state{opt = #sandbox_opt{fd_scheduler = Sched}} = S)
   when Sched =/= undefined ->
