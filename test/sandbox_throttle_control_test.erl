@@ -17,7 +17,7 @@ t_basic() ->
     {Ctl, MRef} = ?S:start(?MODULE, test_entry, [],
                            [ monitor
                            , {fd_opts, [{scheduler, {rw, []}}]}
-                           , {throttle_control, {100, 1}}
+                           , {throttle_control, {100, 100}}
                            , {clock_limit, 1000}
                            ]),
     success = receive {'DOWN', MRef, _, _, Reason} -> Reason end,

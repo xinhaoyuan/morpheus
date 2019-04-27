@@ -2562,6 +2562,8 @@ handle(Old, New, Tag, Args, Ann) ->
                 signal ->
                     handle_signals(Ann);
                 timeout ->
+                    %% Only reset for a real timeout
+                    ?SHTABLE_SET(SHT, {handle_counter, self()}, 0),
                     timeout;
                 [message | '$instant_timeout$'] ->
                     timeout;
