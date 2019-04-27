@@ -72,6 +72,7 @@
         , control_timeouts      :: boolean()
         , time_uncertainty      :: integer()
         , execution_limit       :: integer()
+        , throttle_control      :: undefined | {integer(), integer()}
         , stop_on_deadlock      :: boolean()
         , scoped_weight         :: boolean()
         , heartbeat             :: false | once | integer()
@@ -275,6 +276,7 @@ ctl_trace_new_process(#sandbox_opt{trace_send = TSend, trace_receive = TRecv, tr
 %% {scoped_weight, PID} -> Weight
 %% {ref_creation_counter, PID|ctl} -> Integer
 %% {ref_abs_id, REF} -> {Creator, Integer}
+%% {handle_counter, PID} -> Integer
 
 -ifdef(OTP_RELEASE).
 -define(CATCH(EXP), ((fun () -> try {ok, EXP} catch error:R:ST -> {error, R, ST}; exit:R:ST -> {exit, R, ST}; throw:R:ST -> {throw, R, ST} end end)())).
@@ -345,6 +347,7 @@ ctl_init(Opts) ->
           , control_timeouts      = proplists:get_value(control_timeouts, Opts, true)
           , time_uncertainty      = proplists:get_value(time_uncertainty, Opts, 0)
           , execution_limit       = proplists:get_value(execution_limit, Opts, infinity)
+          , throttle_control      = proplists:get_value(throttle_control, Opts, undefined)
           , stop_on_deadlock      = proplists:get_value(stop_on_deadlock, Opts, true)
           , scoped_weight         = proplists:get_value(scoped_weight, Opts, undefined)
           , heartbeat             = proplists:get_value(heartbeat, Opts, 10000)
@@ -2337,18 +2340,35 @@ to_expose(_, _, _, _) ->
 handle(Old, New, Tag, Args, Ann) ->
     handle_signals(Ann),
     #sandbox_opt{ verbose_handle = Verbose
+                , throttle_control = ThrottleCtrl
                 , aux_module = Aux
                 , scoped_weight = ScopedWeight
                 } = Opt = get_opt(),
+    SHT = get_shtab(),
     case Verbose of
         true ->
-            case ?SHTABLE_GET(get_shtab(), tracing) of
+            case ?SHTABLE_GET(SHT, tracing) of
                 {_, true} ->
                     ?INFO("~p ~p handle: ~w~n  ~p", [self(), Ann, Tag, Args]);
                 _ ->
                     ok
             end;
         _ -> ok
+    end,
+    case ThrottleCtrl of
+        undefined ->
+            ok;
+        {Limit, Wait} ->
+            {_, HC} = ?SHTABLE_INC(SHT, {handle_counter, self()}, 1),
+            case HC > Limit of
+                false ->
+                    ok;
+                true ->
+                    ?INFO("throttle control: delay ~w for ~w ms", [self(), Wait]),
+                    %% -1 for the extra receive
+                    ?SHTABLE_SET(SHT, {handle_counter, self()}, -1),
+                    handle(Old, New, 'receive', [fun (_) -> false end, Wait], Ann)
+            end
     end,
     case ScopedWeight =/= undefined
         andalso Aux =/= undefined
@@ -2650,6 +2670,7 @@ instrumented_process_created(Ctl, Where, ShTab, Node, Proc, Creator, Entry) ->
                 {pid, Node, [C | PList]}
         end,
     ?SHTABLE_SET(ShTab, {proc_abs_id, Proc}, NewAbsId),
+    ?SHTABLE_SET(ShTab, {handle_counter, Proc}, 0),
     {ok, ok} = ?cc_instrumented_process_created(Ctl, Where, Node, Proc, Creator, Entry).
 
 instrumented_process_kick(Ctl, _Node, Proc) ->
