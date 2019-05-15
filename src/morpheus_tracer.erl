@@ -146,6 +146,7 @@ create_acc_ets_tab() ->
     ets:insert(Tab, {{path_hit_counter, 1}, 0}),
     ets:insert(Tab, {path_node_counter, 1}),
     ets:insert(Tab, {po_coverage_counter, 0}),
+    ets:insert(Tab, {po_node_counter, 0}),
     ets:insert(Tab, {path_coverage_counter, 0}),
     ets:insert(Tab, {line_coverage_counter, 0}),
     ets:insert(Tab, {state_coverage_counter, 0}),
@@ -251,6 +252,46 @@ handle_last_sch(#po_state{ sch_vc = SchVC
         , sch_dep_vc = dict:store(LastSch, DepVC, SchDepVC)
         , conflicts = [{LastSch, SchConflicts} | Conflicts]
         }.
+
+canonicalize_po_history(POH) ->
+    canonicalize_po_history(POH, #{}, []).
+
+canonicalize_po_history(POH, Counters, TraceRev) ->
+    Sch =
+        maps:fold(fun (P, [], Acc) ->
+                          Acc;
+                      (P, [H | T], Acc) ->
+                          CanSchedule =
+                              maps:fold(fun (_, _, false) ->
+                                                false;
+                                            (HP, HC, true) ->
+                                                HP =:= P orelse maps:get(HP, Counters, 0) >= HC
+                                        end, true, H),
+                          case CanSchedule andalso Acc of
+                              false ->
+                                  Acc;
+                          none ->
+                                  {P, T};
+                              {AccP, AccT} when AccP > P->
+                                  {P, T};
+                              _ ->
+                                  Acc
+                          end
+                  end, none, POH),
+    case Sch of
+        none ->
+            IsClear = maps:fold(fun (P, [], Acc) -> Acc;
+                                    (P, _, _) -> false
+                                end, true, POH),
+            case IsClear of
+                true -> ok;
+                false ->
+                    error(po_history_is_not_drained)
+            end,
+            lists:reverse(TraceRev);
+        {SchP, SchT} ->
+            canonicalize_po_history(POH#{SchP := SchT}, Counters#{SchP => maps:get(SchP, Counters, 0) + 1}, [SchP | TraceRev])
+    end.
 
 analyze_partial_order(#state{find_races = FindRaces} = _State, Tab, SimpMap) ->
     #po_state
@@ -537,28 +578,62 @@ analyze_partial_order(#state{find_races = FindRaces} = _State, Tab, SimpMap) ->
 
 merge_po_coverage(#state{extra_opts = ExtraOpts} = State, Tab, IC, AccTab, #{partial_order_history := POH} = FinalData) ->
     %% Thus we can count how many partial orders has been covered.
-    case ets:insert_new(AccTab, {{po_trace, POH}, [IC]}) of
+    %% case ets:insert_new(AccTab, {{po_trace, POH}, [IC]}) of
+    %%     true ->
+    %%         case maps:get(dump_po_traces, ExtraOpts, undefined) of
+    %%             D when D =:= new orelse D =:= all ->
+    %%                 %% io:format(user, "New po trace ~p~n", [maps:get(simplified_po_trace, FinalData, POH)]),
+    %%                 io:format(user, "New po trace ~p~n", [canonicalize_po_history(POH)]),
+    %%                 dump_trace(State, AccTab, Tab, FinalData);
+    %%             _ ->
+    %%                 ok
+    %%         end,
+    %%         ets:update_counter(AccTab, po_coverage_counter, 1);
+    %%     false ->
+    %%         case maps:get(dump_po_traces, ExtraOpts, undefined) of
+    %%             all ->
+    %%                 io:format(user, "po trace ~p~n", [POH]),
+    %%                 dump_trace(State, AccTab, Tab, FinalData);
+    %%             _ ->
+    %%                 ok
+    %%         end,
+    %%         case ets:lookup(AccTab, {po_trace, POH}) of
+    %%             [{_, ItList}] ->
+    %%                 ets:update_element(AccTab, {po_trace, POH}, [{2, [IC | ItList]}])
+    %%         end
+    %% end,
+    %% ok
+    CanonicalPOTrace = canonicalize_po_history(POH),
+    {_, IsNew} =
+        lists:foldl(fun (P, {Node, IsNew}) ->
+                            case ets:lookup(AccTab, {po_node_branch, Node, P}) of
+                                [] ->
+                                    NewNode = ets:update_counter(AccTab, po_node_counter, 1),
+                                    ets:insert(AccTab, {{po_node_branch, Node, P}, NewNode}), 
+                                    {NewNode, true};
+                                [{_, _Nx}] ->
+                                    {_Nx, IsNew}
+                            end
+                    end, {1, false}, CanonicalPOTrace),
+    ToDump =
+        case maps:get(dump_po_traces, ExtraOpts, undefined) of
+            all -> true;
+            new when IsNew -> true;
+            _ -> false
+        end,
+    case ToDump of
         true ->
-            case maps:get(dump_po_traces, ExtraOpts, undefined) of
-                new ->
-                    io:format(user, "New po trace ~p~n", [maps:get(simplified_po_trace, FinalData, POH)]),
-                    dump_trace(State, AccTab, Tab, FinalData);
-                _ ->
-                    ok
-            end,
+            io:format(user, "Canonicalized PO trace: ~p~n", [CanonicalPOTrace]),
+            %% dump_trace(State, AccTab, Tab, FinalData),
+            ok;
+        _ ->
+            ok
+    end,
+    case IsNew of
+        true ->
             ets:update_counter(AccTab, po_coverage_counter, 1);
         false ->
-            case maps:get(dump_po_traces, ExtraOpts, undefined) of
-                all ->
-                    io:format(user, "po trace ~p~n", [POH]),
-                    dump_trace(State, AccTab, Tab, FinalData);
-                _ ->
-                    ok
-            end,
-            case ets:lookup(AccTab, {po_trace, POH}) of
-                [{_, ItList}] ->
-                    ets:update_element(AccTab, {po_trace, POH}, [{2, [IC | ItList]}])
-            end
+            ok
     end,
     ok.
 
