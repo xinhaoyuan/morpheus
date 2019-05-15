@@ -609,6 +609,12 @@ merge_po_coverage(#state{extra_opts = ExtraOpts} = State, Tab, IC, AccTab, #{par
                             case ets:lookup(AccTab, {po_node_branch, Node, P}) of
                                 [] ->
                                     NewNode = ets:update_counter(AccTab, po_node_counter, 1),
+                                    case ets:lookup(AccTab, {po_node_branches, Node}) of
+                                        [{_, Branches}] ->
+                                            ets:update_element(AccTab, {po_node_branches, Node}, {2, [NewNode | Branches]});
+                                        [] ->
+                                            ets:insert(AccTab, {{po_node_branches, Node}, [NewNode]})
+                                    end,
                                     ets:insert(AccTab, {{po_node_branch, Node, P}, NewNode}), 
                                     {NewNode, true};
                                 [{_, _Nx}] ->
