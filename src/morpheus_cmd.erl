@@ -114,14 +114,18 @@ main(["aggregate-states" | AccFilenames]) ->
               end, undefined, Data)
     end;
 main(["aggregate-po-filter" | Args]) ->
-    {Filenames, Filter} = split_filenames_and_filter(Args),
+    {Filenames, _Filter} = split_filenames_and_filter(Args),
     Data = aggregate_po_acc_files(Filenames),
-    Result = filter_aggregated_po(Data, Filter),
-    maps:fold(
-      fun (PO, Info, _) ->
-              io:format("Info: ~w~n  ~p~n", [Info, PO]),
-              undefined
-      end, undefined, Result),
+    %% Result = filter_aggregated_po(Data, Filter),
+    %% maps:fold(
+    %%   fun (PO, Info, _) ->
+    %%           io:format("Info: ~w~n  ~p~n", [Info, PO]),
+    %%           undefined
+    %%   end, undefined, Result),
+    case ets:lookup(Data, po_coverage_counter) of
+        [{_, Counter}] ->
+            io:format("po coverage: ~p~n", [Counter])
+    end,
     ok;
 main(["visualize-path-info" | AccFilenames]) ->
     {Data, AccTabList} = aggregate_path_info(AccFilenames),
@@ -254,22 +258,95 @@ aggregate_states_acc_files([Filename | Others], {Index, Result}) ->
     TabCount = StateCount,
     aggregate_states_acc_files(Others, {Index + 1, NewResult}).
 
-aggregate_po_acc_files(Filenames) ->
-    aggregate_po_acc_files(Filenames, {1, #{}}).
+%% aggregate_po_acc_files(Filenames) ->
+%%     aggregate_po_acc_files(Filenames, {1, #{}}).
 
-aggregate_po_acc_files([], {_Index, Result}) ->
-    Result;
-aggregate_po_acc_files([Filename | Others], {Index, Acc}) ->
-    {ok, AccTab} = ets:file2tab(Filename, [{verify, true}]),
-    Acc1 =
-        ets:foldl(
-          fun ({{po_trace, PO}, _ItList}, Cur) ->
-                  Old = maps:get(PO, Cur, []),
-                  Cur#{PO => [Index | Old]};
-              (_, Cur) ->
-                  Cur
-          end, Acc, AccTab),
-    aggregate_po_acc_files(Others, {Index + 1, Acc1}).
+%% aggregate_po_acc_files([], {_Index, Result}) ->
+%%     Result;
+%% aggregate_po_acc_files([Filename | Others], {Index, Acc}) ->
+%%     {ok, AccTab} = ets:file2tab(Filename, [{verify, true}]),
+%%     Acc1 =
+%%         ets:foldl(
+%%           fun ({{po_trace, PO}, _ItList}, Cur) ->
+%%                   Old = maps:get(PO, Cur, []),
+%%                   Cur#{PO => [Index | Old]};
+%%               (_, Cur) ->
+%%                   Cur
+%%           end, Acc, AccTab),
+%%     aggregate_po_acc_files(Others, {Index + 1, Acc1}).
+
+aggregate_po_acc_files(Filenames) ->
+    R = ets:new(aggregate_tab, []),
+    ets:insert(R, {po_node_counter, 1}),
+    ets:insert(R, {{po_node_info, 1}, 0, []}),
+    ets:insert(R, {po_coverage_counter, 0}),
+    aggregate_po_acc_files(Filenames, 1, R),
+    R.
+
+aggregate_po_acc_files([], _, _) ->
+    ok;
+aggregate_po_acc_files([F | R], _Index, none) ->
+    {ok, Tab} = ets:file2tab(F, [{verify, true}]),
+    aggregate_po_acc_files(R, _Index + 1, Tab);
+aggregate_po_acc_files([F | R], _Index, Agg) ->
+    {ok, Tab} = ets:file2tab(F, [{verify, true}]),
+    merge_from_po_node(Tab, [], [[root]], [], Agg, false),
+    aggregate_po_acc_files(R, _Index + 1, Agg).
+
+merge_from_po_node(_, [], [[]], [], _, _) ->
+    ok;
+merge_from_po_node(Tab, [_ | PathT] = _Path, [[] | R] = _BranchStack, [_ | AggPathT] = _AggPath, Agg, _IsNew) ->
+    %% io:format(user, "??? ~p ~p ~p~n", [_Path, _BranchStack, _AggPath]),
+    merge_from_po_node(Tab, PathT, R, AggPathT, Agg, false);
+merge_from_po_node(Tab, Path, [[H | T] | R] = _BranchStack, AggPath, Agg, _IsNew) ->
+    %% io:format(user, "??? ~p ~p ~p~n", [Path, _BranchStack, AggPath]),
+    NewPath =
+        case H of
+            root -> [1];
+            _ ->
+                [PathH | _] = Path,
+                case ets:lookup(Tab, {po_node_branch, PathH, H}) of
+                    [{_, _Next}] ->
+                        [_Next | Path]
+                end
+        end,
+    {NewAggPath, IsNew1} =
+        case H of
+            root -> {[1], false};
+            _ ->
+                [AggPathH | _] = AggPath,
+                case ets:lookup(Agg, {po_node_branch, AggPathH, H}) of
+                    [] ->
+                        NewNode = ets:update_counter(Agg, po_node_counter, 1),
+                        case ets:lookup(Agg, {po_node_info, AggPathH}) of
+                            [{_, _, AggBranches}] ->
+                                ets:update_element(Agg, {po_node_info, AggPathH}, {3, [H | AggBranches]})
+                        end,
+                        ets:insert(Agg, {{po_node_branch, AggPathH, H}, NewNode}),
+                        ets:insert(Agg, {{po_node_info, NewNode}, 0, [H]}),
+                        {[NewNode | AggPath], true};
+                    [{_, _NextAgg}] ->
+                        {[_NextAgg | AggPath], false}
+                end
+        end,
+    [NewAggPathH | _] = NewAggPath,
+    [NewPathH | _] = NewPath,
+    %% io:format(user, "??? ~p ~p~n", [NewAggPath, NewPath]),
+    case ets:lookup(Tab, {po_node_info, NewPathH}) of
+        [{_, HitCount, Branches}] ->
+            case HitCount > 0 of
+                true ->
+                    case ets:update_counter(Agg, {po_node_info, NewAggPathH}, {2, HitCount}) of
+                        HitCount ->
+                            ets:update_counter(Agg, po_coverage_counter, 1);
+                        _ ->
+                            ok
+                    end;
+                false ->
+                    ok
+            end,
+            merge_from_po_node(Tab, NewPath, [Branches, T | R], NewAggPath, Agg, IsNew1)
+    end.
 
 split_filenames_and_filter(Args) ->
     split_filenames_and_filter(Args, {[], sets:new()}).
@@ -299,21 +376,21 @@ split_filenames_and_filter([[$- | IndexStr] = FilterItem | Tail], {FilenamesRev,
 split_filenames_and_filter([Filename | Tail], {FilenamesRev, Filter}) ->
     split_filenames_and_filter(Tail, {[Filename | FilenamesRev], Filter}).
 
-filter_aggregated_po(Data, Filter) ->
-    maps:fold(
-      fun (PO, Info, Acc) ->
-              Match = lists:foldl(
-                        fun (_, false) ->
-                                false;
-                            ({inc, Index}, true) ->
-                                lists:member(Index, Info);
-                            ({exc, Index}, true) ->
-                                not lists:member(Index, Info)
-                        end, true, Filter),
-              case Match of
-                  true ->
-                      Acc#{PO => Info};
-                  false ->
-                      Acc
-              end
-      end, #{}, Data).
+%% filter_aggregated_po(Data, Filter) ->
+%%     maps:fold(
+%%       fun (PO, Info, Acc) ->
+%%               Match = lists:foldl(
+%%                         fun (_, false) ->
+%%                                 false;
+%%                             ({inc, Index}, true) ->
+%%                                 lists:member(Index, Info);
+%%                             ({exc, Index}, true) ->
+%%                                 not lists:member(Index, Info)
+%%                         end, true, Filter),
+%%               case Match of
+%%                   true ->
+%%                       Acc#{PO => Info};
+%%                   false ->
+%%                       Acc
+%%               end
+%%       end, #{}, Data).

@@ -146,7 +146,8 @@ create_acc_ets_tab() ->
     ets:insert(Tab, {{path_hit_counter, 1}, 0}),
     ets:insert(Tab, {path_node_counter, 1}),
     ets:insert(Tab, {po_coverage_counter, 0}),
-    ets:insert(Tab, {po_node_counter, 0}),
+    ets:insert(Tab, {po_node_counter, 1}),
+    ets:insert(Tab, {{po_node_info, 1}, 0, []}),
     ets:insert(Tab, {path_coverage_counter, 0}),
     ets:insert(Tab, {line_coverage_counter, 0}),
     ets:insert(Tab, {state_coverage_counter, 0}),
@@ -258,7 +259,7 @@ canonicalize_po_history(POH) ->
 
 canonicalize_po_history(POH, Counters, TraceRev) ->
     Sch =
-        maps:fold(fun (P, [], Acc) ->
+        maps:fold(fun (_P, [], Acc) ->
                           Acc;
                       (P, [H | T], Acc) ->
                           CanSchedule =
@@ -270,9 +271,9 @@ canonicalize_po_history(POH, Counters, TraceRev) ->
                           case CanSchedule andalso Acc of
                               false ->
                                   Acc;
-                          none ->
+                              none ->
                                   {P, T};
-                              {AccP, AccT} when AccP > P->
+                              {AccP, _AccT} when AccP > P->
                                   {P, T};
                               _ ->
                                   Acc
@@ -280,8 +281,8 @@ canonicalize_po_history(POH, Counters, TraceRev) ->
                   end, none, POH),
     case Sch of
         none ->
-            IsClear = maps:fold(fun (P, [], Acc) -> Acc;
-                                    (P, _, _) -> false
+            IsClear = maps:fold(fun (_, [], Acc) -> Acc;
+                                    (_, _, _) -> false
                                 end, true, POH),
             case IsClear of
                 true -> ok;
@@ -576,7 +577,7 @@ analyze_partial_order(#state{find_races = FindRaces} = _State, Tab, SimpMap) ->
 %%                        RestSerialization,
 %%                        [{FromI, Height, ToI, Content} | Rev]).
 
-merge_po_coverage(#state{extra_opts = ExtraOpts} = State, Tab, IC, AccTab, #{partial_order_history := POH} = FinalData) ->
+merge_po_coverage(#state{extra_opts = ExtraOpts} = _State, _Tab, _IC, AccTab, #{partial_order_history := POH} = _FinalData) ->
     %% Thus we can count how many partial orders has been covered.
     %% case ets:insert_new(AccTab, {{po_trace, POH}, [IC]}) of
     %%     true ->
@@ -604,23 +605,30 @@ merge_po_coverage(#state{extra_opts = ExtraOpts} = State, Tab, IC, AccTab, #{par
     %% end,
     %% ok
     CanonicalPOTrace = canonicalize_po_history(POH),
-    {_, IsNew} =
-        lists:foldl(fun (P, {Node, IsNew}) ->
+    EndNode =
+        lists:foldl(fun (P, Node) ->
                             case ets:lookup(AccTab, {po_node_branch, Node, P}) of
                                 [] ->
                                     NewNode = ets:update_counter(AccTab, po_node_counter, 1),
-                                    case ets:lookup(AccTab, {po_node_branches, Node}) of
-                                        [{_, Branches}] ->
-                                            ets:update_element(AccTab, {po_node_branches, Node}, {2, [NewNode | Branches]});
-                                        [] ->
-                                            ets:insert(AccTab, {{po_node_branches, Node}, [NewNode]})
+                                    case ets:lookup(AccTab, {po_node_info, Node}) of
+                                        [{_, _, Branches}] ->
+                                            ets:update_element(AccTab, {po_node_info, Node}, {3, [P | Branches]})
                                     end,
-                                    ets:insert(AccTab, {{po_node_branch, Node, P}, NewNode}), 
-                                    {NewNode, true};
+                                    ets:insert(AccTab, {{po_node_branch, Node, P}, NewNode}),
+                                    ets:insert(AccTab, {{po_node_info, NewNode}, 0, []}),
+                                    NewNode;
                                 [{_, _Nx}] ->
-                                    {_Nx, IsNew}
+                                    _Nx
                             end
-                    end, {1, false}, CanonicalPOTrace),
+                    end, 1, CanonicalPOTrace),
+    IsNew =
+        case ets:update_counter(AccTab, {po_node_info, EndNode}, {2, 1}) of
+            1 ->
+                ets:update_counter(AccTab, po_coverage_counter, 1),
+                true;
+            _ ->
+                false
+        end,
     ToDump =
         case maps:get(dump_po_traces, ExtraOpts, undefined) of
             all -> true;
@@ -633,12 +641,6 @@ merge_po_coverage(#state{extra_opts = ExtraOpts} = State, Tab, IC, AccTab, #{par
             %% dump_trace(State, AccTab, Tab, FinalData),
             ok;
         _ ->
-            ok
-    end,
-    case IsNew of
-        true ->
-            ets:update_counter(AccTab, po_coverage_counter, 1);
-        false ->
             ok
     end,
     ok.
