@@ -117,6 +117,8 @@
         , undet_kick       :: undefined | reference()
         , undet_nifs       :: [{atom(), atom(), integer()} | {atom(), atom()} | {atom()} | atom()]
         , scheduler_push_counter :: integer()
+        , pop_counter      :: integer()
+        , rt_instrument    :: {integer(), integer()}
         , weight_table     :: dict:dict()
         }).
 
@@ -384,6 +386,8 @@ ctl_init(Opts) ->
         , undet_kick = undefined
         , undet_nifs = proplists:get_value(undet_nifs, Opts, [])
         , scheduler_push_counter = 0
+        , pop_counter = 0
+        , rt_instrument = {0, 0}
         , weight_table = dict:new()
         },
     S.
@@ -517,7 +521,8 @@ ctl_loop(S0) ->
                     ctl_loop(ctl_loop_call(S, Where, ToTrace, Pid, Ref, Req))
             end;
         #fd_delay_resp{ref = Ref, data = DelayRespData} ->
-            {SAfterPop, Where, ReplyTo, Ref, Req, _ReqData} = ctl_pop_request_from_buffer(S, Ref),
+            {SAfterPop0, Where, ReplyTo, Ref, Req, _ReqData} = ctl_pop_request_from_buffer(S, Ref),
+            SAfterPop = SAfterPop0#sandbox_state{pop_counter = SAfterPop0#sandbox_state.pop_counter + 1},
             case ToTrace of
                 true -> ?INFO("schedule resp ~p", [Req]);
                 false -> ok
@@ -1033,9 +1038,14 @@ ctl_handle_call(#sandbox_state{mod_table = MT} = S,
                                {_, _, _} = _Result ->
                                    _Result
                            end,
+                       #sandbox_state{rt_instrument = {RT, WT}} = S,
+                       {RT1, _} = erlang:statistics(runtime),
+                       {WT1, _} = erlang:statistics(wall_clock),
                        {ok, S1, Nifs, _} = ?I:instrument_and_load(?MODULE, S, M, NewM, Filename, ObjectCode),
+                       {RT2, _} = erlang:statistics(runtime),
+                       {WT2, _} = erlang:statistics(wall_clock),
                        NewMT = ?TABLE_SET(MT, M, {NewM, Nifs}),
-                       {S1#sandbox_state{mod_table = NewMT}, {NewM, Nifs}}
+                       {S1#sandbox_state{mod_table = NewMT, rt_instrument = {RT + RT2 - RT1, WT + WT2 - WT1}}, {NewM, Nifs}}
                    end)
             of
                 {ok, Result} -> Result;
@@ -2256,7 +2266,6 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT, proc_shtable = SHT} = S
                     end, {0, 0}),
     ets:delete(MT),
     ets:delete(PT),
-    ?INFO("ctl stop transient = ~p, lives = ~p, deads = ~p", [S#sandbox_state.transient_counter, Lives, Deads]),
     #sandbox_state{opt = #sandbox_opt{fd_opts = FdOpts, fd_scheduler = FdSched, diffiso_port = DiffisoPort, tracer_pid = TP}} = S,
     FdTraceInfo =
         case FdOpts of
@@ -2278,15 +2287,24 @@ ctl_exit(#sandbox_state{mod_table = MT, proc_table = PT, proc_shtable = SHT} = S
         _ ->
             firedrill:stop()
     end,
-    case TP of
-        undefined -> ok;
-        _ ->
-            ?T:finalize(TP, FdTraceInfo, SHT)
-    end,
+    TracerTime =
+        case TP of
+            undefined -> {0, 0};
+            _ ->
+                {TracerStartRT, _} = erlang:statistics(runtime),
+                {TracerStartWT, _} = erlang:statistics(wall_clock),
+                ?T:finalize(TP, FdTraceInfo, SHT),
+                {TracerEndRT, _} = erlang:statistics(runtime),
+                {TracerEndWT, _} = erlang:statistics(wall_clock),
+                {TracerEndRT - TracerStartRT, TracerEndWT - TracerStartWT} 
+        end,
     case S#sandbox_state.opt#sandbox_opt.tracer_opts of
         undefined -> ok;
         _ -> ?T:stop(TP)
     end,
+    ?INFO("ctl stop transient = ~w, lives = ~w, deads = ~w, vclock = ~w, pop_counter = ~w",
+          [S#sandbox_state.transient_counter, Lives, Deads, S#sandbox_state.vclock, S#sandbox_state.pop_counter]),
+    ?INFO("  rt info: instrument = ~w, tracer = ~w", [S#sandbox_state.rt_instrument, TracerTime]), 
     exit(Reason).
 
 fd_get_trace_info(FdSched) ->
